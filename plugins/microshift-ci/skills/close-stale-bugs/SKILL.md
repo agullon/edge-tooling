@@ -28,7 +28,7 @@ A bug is closed when **all** of the following are true:
 
 Operates in **dry-run mode by default** — shows which bugs would be closed without taking action. Use `--close` to actually close them.
 
-**Intended run order**: doctor → find-regressions → close-stale-bugs → refresh
+**Intended run order**: doctor (includes bug search) → close-stale-bugs → refresh
 
 ## Arguments
 
@@ -186,8 +186,7 @@ Actually closes all matching bugs in JIRA.
 
 ## Related Skills
 
-- **microshift-ci:doctor**: Full CI analysis workflow (produces the bugs summary file consumed by this skill)
-- **microshift-ci:find-regressions**: Bug search and ticket suggestions (should run before this skill)
+- **microshift-ci:doctor**: Full CI analysis workflow (includes bug search; produces the bugs summary file consumed by this skill)
 - **microshift-ci:doctor-refresh**: Regenerate the HTML report (should run after this skill to reflect closures)
 
 ## Notes

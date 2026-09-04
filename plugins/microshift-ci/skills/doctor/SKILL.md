@@ -16,7 +16,7 @@ allowed-tools: Skill, Bash, Read, Write, Glob, Grep, Agent
 
 ## Description
 
-Accepts a comma-separated list of MicroShift release versions, runs analysis for each release and for open rebase PRs, and produces a single HTML summary file consolidating all results. Uses deterministic scripts for data collection, artifact download, aggregation, and HTML generation. LLM agents are used only for per-job root cause analysis and Jira bug correlation.
+Accepts a comma-separated list of MicroShift release versions, runs analysis for each release and for open rebase PRs, and produces a single HTML summary file consolidating all results. Uses deterministic scripts for data collection, artifact download, Jira bug search, failure categorization, aggregation, and HTML generation. LLM agents are used only for per-job root cause analysis.
 
 ## Arguments
 
@@ -42,7 +42,7 @@ Compute once at the start by running `date +%y%m%d` and substituting into the pa
 2. Run the prepare script:
 
    ```text
-   bash plugins/microshift-ci/scripts/doctor.sh prepare --component microshift --workdir <WORKDIR> <ARGUMENTS> --pull-requests --repo openshift/microshift
+   bash plugins/microshift-ci/scripts/doctor-helper.sh prepare --component microshift --workdir <WORKDIR> <ARGUMENTS> --pull-requests --repo openshift/microshift
    ```
 
 3. The script deterministically:
@@ -132,21 +132,26 @@ Compute once at the start by running `date +%y%m%d` and substituting into the pa
 
 **Actions**:
 
-1. Read `<WORKDIR>/jobs/prs-status.json`. For each entry whose `title` field contains `rebase-release-<version>`, record the source identifier `rebase-release-<version>`. If the file is empty or missing, skip this action (no rebase sources).
-2. Build the full source list: all release versions from `<ARGUMENTS>` plus any rebase source identifiers from the previous action (e.g., `4.19,4.20,4.21,4.22,rebase-release-4.22`).
-3. Launch a **single** **foreground** agent with the full source list:
+1. Build the source list: all release versions from `<ARGUMENTS>` (comma-separated).
+2. Run the bug search pipeline (deterministic script that auto-appends rebase sources from `prs-status.json`):
 
    ```text
-   Agent: subagent_type=general_purpose, prompt="Run /microshift-ci:find-regressions <full-source-list>"
+   python3 plugins/microshift-ci/scripts/search-bugs.py --pipeline <comma-separated-sources> --workdir <WORKDIR>
    ```
 
-4. The agent writes `<WORKDIR>/bugs/bug-matches-<source>.json` for each source — **required by Step 4** for HTML generation.
-   Additional outputs (for downstream skills): `bug-candidates-merged-<SOURCE_TAG>.json`, `bug-results-<SOURCE_TAG>.json`, `report-find-regressions.txt`.
-5. Immediately proceed to Step 4 in the same turn. Do NOT stop or end your turn between Step 3 and Step 4.
+   Example: if `<ARGUMENTS>` is `4.19,4.20,4.21`, pass `--pipeline 4.19,4.20,4.21`.
+
+3. The script deterministically:
+   - Auto-discovers rebase sources from `<WORKDIR>/jobs/prs-status.json` (titles containing `rebase-release-<version>`)
+   - For each source: prepares candidates → searches Jira → merges → categorizes → reports
+   - Writes `<WORKDIR>/bugs/bug-matches-<source>.json` for each source — **required by Step 4** for HTML generation
+   - Additional outputs (for downstream skills): `bug-candidates-merged-<SOURCE_TAG>.json`, `bug-results-<SOURCE_TAG>.json`, `bug-search-<SOURCE_TAG>.txt`
+4. Immediately proceed to Step 4 in the same turn. Do NOT stop or end your turn between Step 3 and Step 4.
 
 **Error Handling**:
 
-- If the find-regressions agent fails or returns partial results, note the failure but do not block HTML generation — Step 4 produces the report with whatever bug mapping data is available
+- If Jira credentials (`JIRA_USERNAME`, `JIRA_API_TOKEN`) are not set, the script writes empty `duplicates`/`regressions` arrays and continues — the report still builds with "Create Bug in JIRA" buttons
+- If the script fails or returns partial results, note the failure but do not block HTML generation — Step 4 produces the report with whatever bug mapping data is available
 
 ### Step 4: Finalize — Aggregate and Generate HTML Report
 
@@ -213,7 +218,7 @@ HTML report generated: <WORKDIR>/report-microshift-ci-doctor.html
 
 - `gsutil` CLI must be installed for GCS access (uses anonymous access on public buckets)
 - `gh` CLI must be authenticated with access to openshift/microshift
-- MCP Jira server must be configured (for bug correlation)
+- `JIRA_USERNAME` and `JIRA_API_TOKEN` environment variables (optional — bug links omitted if unset)
 - Internet access to fetch job data from Prow/GCS
 - Bash shell, Python 3
 - `pcp-export-pcp2json` — for PCP metric extraction
@@ -221,16 +226,15 @@ HTML report generated: <WORKDIR>/report-microshift-ci-doctor.html
 ## Related Skills
 
 - **microshift-ci:prow-job-analyzer** agent: Root cause analysis for a single job (used by Step 2 agents)
-- **microshift-ci:find-regressions**: Bug search and ticket suggestions (used in Step 3)
 - **microshift-ci:doctor-refresh**: Regenerate the HTML report from existing data
 
 ## Notes
 
-- **Deterministic scripts** handle: data collection, artifact download, aggregation, HTML generation
-- **LLM agents** handle: per-job root cause analysis (Step 2), Jira bug search and failure categorization (Step 3)
+- **Deterministic scripts** handle: data collection, artifact download, Jira bug search, failure categorization, aggregation, HTML generation
+- **LLM agents** handle: per-job root cause analysis (Step 2 only)
 - `/microshift-ci:doctor-refresh` regenerates the HTML report from existing data
 - Step 2 agents (per-job analysis) are launched in a single parallel wave
-- Step 3 uses a single find-regressions agent (search-only, no ticket creation) with all sources (releases + rebase) comma-separated
+- Step 3 uses a deterministic script (`search-bugs.py --pipeline`) that searches Jira via REST API and categorizes failures using a rules-based decision policy
 - The `prepare` script downloads all artifacts upfront so prow-job agents use local paths (no redundant downloads)
 - The `prepare` script also clones the MicroShift source to `<WORKDIR>/src/microshift` with per-release worktrees (`--repo openshift/microshift`); clone failure is non-fatal — agents record the absence in `analysis_gaps` and proceed
 - The `finalize` script runs aggregation and HTML generation in one call

@@ -36,7 +36,6 @@ python3 plugins/microshift-ci/scripts/run-doctor.py \
 | `/microshift-ci:prow-job` | Root cause analysis of a single Prow job |
 | `/microshift-ci:test-job` | Comprehensive job metadata and scenario results |
 | `/microshift-ci:test-scenario` | Analyze individual test scenario results |
-| `/microshift-ci:find-regressions` | Search JIRA for pre-existing bugs and draft ticket suggestions |
 | `/microshift-ci:close-stale-bugs` | Close stale, unlinked, unassigned AI-generated bugs (dry-run by default) |
 | `/microshift-ci:continue-session` | Download CI Doctor artifacts from a completed prow job |
 | `/microshift-ci:fix-test-bugs` | Attempt to fix CI bugs by opening PRs in openshift/microshift (dry-run by default) |
@@ -54,12 +53,6 @@ python3 plugins/microshift-ci/scripts/run-doctor.py \
 
 ```text
 /microshift-ci:prow-job https://prow.ci.openshift.org/view/gs/test-platform-results/logs/<job-name>/<job-id>
-```
-
-### Search for bugs and draft suggestions
-
-```text
-/microshift-ci:find-regressions 4.22
 ```
 
 Searches JIRA for pre-existing bugs matching CI failures and drafts ticket

@@ -16,7 +16,7 @@ allowed-tools: Bash, Read, Glob
 
 ## Description
 
-Regenerates the CI Doctor HTML report from existing data. Use this after `/microshift-ci:find-regressions` or `/microshift-ci:close-stale-bugs` to refresh the report with updated bug data.
+Regenerates the CI Doctor HTML report from existing data. Use this after `/microshift-ci:close-stale-bugs` to refresh the report with updated bug data.
 
 This is a lightweight operation: it does not re-analyze jobs, re-aggregate summaries, or re-query JIRA. It reads the existing bug mapping files and regenerates the HTML.
 
@@ -53,12 +53,12 @@ Compute once at the start by running `date +%y%m%d` and substituting into the pa
 
    ```text
    Error: bug mapping files missing for: <sources>
-   Run the find-regressions workflow first: /microshift-ci:find-regressions <sources>
+   Run the doctor workflow first: /microshift-ci:doctor <sources>
    ```
 
    Continue to Step 3 anyway — the HTML report will be generated with whatever data is available.
 
-**Do NOT** delete bug mapping files. **Do NOT** launch find-regressions agents. The mapping files are produced by the preceding `/microshift-ci:find-regressions` session.
+**Do NOT** delete bug mapping files. **Do NOT** re-run bug search. The mapping files are produced by the preceding `/microshift-ci:doctor` session (Step 3: search-bugs.py --pipeline).
 
 ### Step 3: Check for Closed Bugs
 
@@ -95,14 +95,13 @@ Display the path to the regenerated HTML report.
 ## Prerequisites
 
 - An existing workdir from a prior `/microshift-ci:doctor` run
-- Bug mapping files from a prior `/microshift-ci:find-regressions` run
+- Bug mapping files from a prior `/microshift-ci:doctor` run (produced by search-bugs.py --pipeline)
 
 ## Related Skills
 
-- **microshift-ci:doctor**: Full CI analysis workflow (produces the initial HTML report)
-- **microshift-ci:find-regressions**: Bug search and ticket suggestions (produces the bug mapping files consumed by this skill)
+- **microshift-ci:doctor**: Full CI analysis workflow (produces the initial HTML report and bug mapping files)
 
 ## Notes
 
 - This skill does NOT re-analyze jobs, re-aggregate summaries, or re-query JIRA — it only regenerates the HTML from existing data
-- Bug mapping files must already exist from a prior `/microshift-ci:find-regressions` run
+- Bug mapping files must already exist from a prior `/microshift-ci:doctor` run
