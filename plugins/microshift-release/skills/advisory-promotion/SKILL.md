@@ -1,6 +1,6 @@
 ---
 name: microshift-release:advisory-promotion
-argument-hint: <version> (-s | -p | -s -p) [--json] [--errata <advisory_id>]
+argument-hint: <version> [-s | -p | -s -p] [--json] [--errata <advisory_id>]
 description: Validate advisory promotion for QE sign-off — Konflux bootc images (default) or Errata Tool RPM advisory (--errata)
 user-invocable: true
 allowed-tools: Bash
@@ -11,7 +11,7 @@ allowed-tools: Bash
 ## Synopsis
 
 ```bash
-/microshift-release:advisory-promotion <version> (-s | -p | -s -p) [--json]
+/microshift-release:advisory-promotion <version> [-s | -p | -s -p] [--json]
 /microshift-release:advisory-promotion <version> --errata <advisory_id>
 ```
 
@@ -64,11 +64,11 @@ Requires VPN and a valid Kerberos ticket (`kinit`).
   - RC: `4.22.0-rc.2`
   - EC: `5.0.0-ec.3`
 - `--errata <advisory_id>` (optional): Switch to Errata Tool mode. `advisory_id` is the ET advisory numeric ID or name (e.g., `12345` or `RHBA-2026:12345`)
-- `-s`/`--stage` (required\*, bootc only): Check stage catalog and shipment errata (common checks always included)
-- `-p`/`--prod` (required\*, bootc only): Check prod catalog and shipment errata (common checks always included)
+- `-s`/`--stage` (optional, bootc only): Check stage catalog and shipment errata (common checks always included)
+- `-p`/`--prod` (optional, bootc only): Check prod catalog and shipment errata (common checks always included)
 - `--json` (optional): Output raw JSON
 
-\*At least one of `--stage` or `--prod` must be provided for bootc mode. Both can be used together.
+If neither `--stage` nor `--prod` is provided in bootc mode, both are checked by default. Either can be passed alone to scope the run.
 
 ## Scripts Directory
 
@@ -94,7 +94,7 @@ SCRIPTS_DIR=plugins/microshift-release/scripts
 bash $SCRIPTS_DIR/advisory_promotion.sh <version> <stage/prod flags> [--json]
 ```
 
-Forward only the `-s`/`-p` flags the user provided. If neither was supplied, ask which environment to check — the CLI requires at least one. Display stderr only if the script exits non-zero.
+Forward the `-s`/`-p` flags the user provided. If neither was supplied, default to checking both — pass `-s -p`. Display stderr only if the script exits non-zero.
 
 ### Step 2b: Run Errata Tool Checks
 
@@ -244,9 +244,10 @@ On failure, details appear below the failing check:
 
 ```bash
 # Bootc mode
+/microshift-release:advisory-promotion 4.20.26              # stage + prod (default)
 /microshift-release:advisory-promotion 4.20.26 -s            # stage only
 /microshift-release:advisory-promotion 4.20.26 -p            # prod only
-/microshift-release:advisory-promotion 4.20.26 -s -p         # all checks
+/microshift-release:advisory-promotion 4.20.26 -s -p         # all checks (explicit)
 /microshift-release:advisory-promotion 4.22.2 -s -p          # el9 + el10
 /microshift-release:advisory-promotion 4.20.26 -s --json     # machine-readable
 
