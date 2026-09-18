@@ -246,8 +246,7 @@ shared-hypervisor contention.
 
 ## PCP performance metrics
 
-When `graphs_dir` is provided, it contains JSON files produced by
-`plugins/microshift-ci/scripts/pcp-graphs/generate-graphs.sh`:
+When `graphs_dir` is provided, it contains following JSON files:
 
 | File | Contents |
 | ---- | ------- |
