@@ -40,13 +40,23 @@ The purpose of this analysis is to surface product defects. When a product compo
 
 Two `Created container` events for the same pod means the first instance died. Read `previous.log` for the exit reason before concluding a single-startup narrative.
 
-When the investigation requires pod/container logs (crashes, restarts, readiness flaps, or repeated container creation), extract a sosreport — see the primer for extraction commands and file locations. Prefer the on-failure sosreport over end-of-scenario. Match sosreport to failure by timestamp.
+When the investigation requires pod/container logs (crashes, restarts, readiness flaps, or repeated container creation), extract a sosreport. Prefer the on-failure sosreport over end-of-scenario. Match sosreport to failure by timestamp.
 
 When `graphs_dir` is provided and the failure involves timeouts, slowness, or resource pressure, read the PCP metric JSON files for correlation with the failure window — see the primer for file names and interpretation guidance.
 
 When `source_dir` is available, read the failing test's source to distinguish test bugs from product bugs. Use `repo-log.sh` (see primer) to list potentially related commits. If the source checkout is absent, note it in `analysis_gaps`.
 
 Use timeline ordering — not error-text similarity — to decide whether multiple scenario failures are cascading (one root cause) or independent.
+
+## Source Correlation
+
+When the source checkout is available, list potentially related commits:
+
+```text
+bash plugins/microshift-ci/scripts/repo-log.sh <SOURCE_DIR> --since <1_MONTH_BEFORE_FINISHED> --until <FINISHED_DATE> --paths test/
+```
+
+Derive `FINISHED_DATE` from `finished.json`. Drop `--paths` to see all changes. Name candidate commits in the causal chain when timing and touched paths match.
 
 ## JSON Schema
 
