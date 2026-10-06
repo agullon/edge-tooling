@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Prepare bug candidates from per-job analysis reports. Run with --help for usage."""
+"""Prepare bug candidates from per-job analysis reports."""
 
+import argparse
 import json
 import sys
 import os
@@ -15,40 +16,9 @@ from parse import (
     group_by_signature, grouping_text, parse_structured_summary, tokenize,
 )
 
+
 # Additional stop words filtered only during keyword extraction for Jira search,
 # not during signature grouping (which uses the shared STOP_WORDS).
-USAGE = """\
-usage: search-bugs.py <source> --workdir DIR
-       search-bugs.py --search <source> --workdir DIR
-       search-bugs.py --pipeline <sources> --workdir DIR
-       search-bugs.py --merge <file1.json> [<file2.json> ...] --output FILE --workdir DIR
-       search-bugs.py --categorize <merged.json> --workdir DIR [--output FILE]
-       search-bugs.py --report <results.json> --candidates <merged.json> --workdir DIR
-
-Prepare bug candidates from per-job analysis reports.
-
-positional arguments:
-  <source>              release version (4.22, main), PR number (pr-6396),
-                        or rebase shorthand (rebase-release-4.22)
-  <sources>             comma-separated sources for pipeline mode
-  <file.json>           candidate files to merge (--merge mode)
-
-options:
-  --workdir DIR         working directory (required)
-  --search SOURCE       search Jira for bugs matching candidates (reads
-                        bug-candidates-<source>.json, writes bug-matches-<source>.json)
-  --pipeline SOURCES    full pipeline: prepare→search→merge→categorize→report
-                        for comma-separated sources; auto-appends rebase sources
-  --merge               merge multiple candidate files with fuzzy dedup
-  --output FILE         output path for merged candidates (--merge mode) or
-                        results (--categorize mode)
-  --categorize FILE     merged candidates JSON to categorize with the
-                        deterministic decision policy (writes bug-results-*.json)
-  --report FILE         results JSON to generate a report from
-  --candidates FILE     merged candidates JSON (required with --report)
-  -h, --help            show this help message and exit
-"""
-
 KEYWORD_STOP_WORDS = STOP_WORDS | frozenset({
     "ci", "microshift", "failure", "failed", "error", "test", "tests",
     "job", "jobs", "step", "periodic",
@@ -1293,142 +1263,106 @@ def main_pipeline(sources_str, workdir):
 # ---------------------------------------------------------------------------
 
 def main():
-    workdir = None
-    source = None
-    merge_mode = False
-    merge_files = []
-    report_file = None
-    candidates_file = None
-    categorize_file = None
-    output_file = None
-    search_source = None
-    pipeline_sources = None
+    parser = argparse.ArgumentParser(
+        description="Prepare bug candidates from per-job analysis reports.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    args = sys.argv[1:]
-    i = 0
-    while i < len(args):
-        if args[i] == "--merge":
-            merge_mode = True
-            i += 1
-        elif args[i] == "--search":
-            if i + 1 >= len(args):
-                print("Error: --search requires an argument", file=sys.stderr)
-                sys.exit(1)
-            search_source = args[i + 1]
-            i += 2
-        elif args[i] == "--pipeline":
-            if i + 1 >= len(args):
-                print("Error: --pipeline requires an argument", file=sys.stderr)
-                sys.exit(1)
-            pipeline_sources = args[i + 1]
-            i += 2
-        elif args[i] == "--report":
-            if i + 1 >= len(args):
-                print("Error: --report requires an argument", file=sys.stderr)
-                sys.exit(1)
-            report_file = args[i + 1]
-            i += 2
-        elif args[i] == "--candidates":
-            if i + 1 >= len(args):
-                print("Error: --candidates requires an argument", file=sys.stderr)
-                sys.exit(1)
-            candidates_file = args[i + 1]
-            i += 2
-        elif args[i] == "--categorize":
-            if i + 1 >= len(args):
-                print("Error: --categorize requires an argument", file=sys.stderr)
-                sys.exit(1)
-            categorize_file = args[i + 1]
-            i += 2
-        elif args[i] == "--workdir":
-            if i + 1 >= len(args):
-                print("Error: --workdir requires an argument", file=sys.stderr)
-                sys.exit(1)
-            workdir = args[i + 1]
-            i += 2
-        elif args[i] == "--output":
-            if i + 1 >= len(args):
-                print("Error: --output requires an argument", file=sys.stderr)
-                sys.exit(1)
-            output_file = args[i + 1]
-            i += 2
-        elif args[i] in ("-h", "--help"):
-            print(USAGE, end="")
-            sys.exit(0)
-        elif args[i].startswith("-"):
-            print(f"Unknown option: {args[i]}", file=sys.stderr)
-            sys.exit(1)
-        else:
-            if merge_mode:
-                merge_files.append(args[i])
-            else:
-                source = args[i]
-            i += 1
+    # Mutually exclusive group for modes
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--search",
+        metavar="SOURCE",
+        help="search Jira for bugs matching candidates (reads bug-candidates-<source>.json, writes bug-matches-<source>.json)",
+    )
+    mode_group.add_argument(
+        "--pipeline",
+        metavar="SOURCES",
+        help="full pipeline: prepare→search→merge→categorize→report for comma-separated sources; auto-appends rebase sources",
+    )
+    mode_group.add_argument(
+        "--merge",
+        action="store_true",
+        help="merge multiple candidate files with fuzzy dedup",
+    )
+    mode_group.add_argument(
+        "--categorize",
+        metavar="FILE",
+        help="merged candidates JSON to categorize with the deterministic decision policy (writes bug-results-*.json)",
+    )
+    mode_group.add_argument(
+        "--report",
+        metavar="FILE",
+        help="results JSON to generate a report from",
+    )
+
+    # Common options
+    parser.add_argument(
+        "--workdir",
+        metavar="DIR",
+        required=True,
+        help="working directory (required)",
+    )
+    parser.add_argument(
+        "--output",
+        metavar="FILE",
+        help="output path for merged candidates (--merge mode) or results (--categorize mode)",
+    )
+    parser.add_argument(
+        "--candidates",
+        metavar="FILE",
+        help="merged candidates JSON (required with --report)",
+    )
+
+    # Positional arguments (source or files)
+    parser.add_argument(
+        "sources",
+        nargs="*",
+        metavar="SOURCE|FILE",
+        help="release version (4.22, main), PR number (pr-6396), rebase shorthand (rebase-release-4.22), or candidate files to merge (--merge mode)",
+    )
+
+    args = parser.parse_args()
 
     # --search mode
-    if search_source:
-        if not workdir:
-            print("Error: --search requires --workdir", file=sys.stderr)
-            sys.exit(1)
-        return main_search(search_source, workdir)
+    if args.search:
+        return main_search(args.search, args.workdir)
 
     # --pipeline mode
-    if pipeline_sources:
-        if not workdir:
-            print("Error: --pipeline requires --workdir", file=sys.stderr)
-            sys.exit(1)
-        return main_pipeline(pipeline_sources, workdir)
+    if args.pipeline:
+        return main_pipeline(args.pipeline, args.workdir)
 
     # --categorize mode
-    if categorize_file:
-        if not workdir:
-            print("Error: --categorize requires --workdir", file=sys.stderr)
-            sys.exit(1)
-        return main_categorize(categorize_file, output_file, workdir)
+    if args.categorize:
+        return main_categorize(args.categorize, args.output, args.workdir)
 
     # --report mode
-    if report_file:
-        if not candidates_file:
-            print("Error: --report requires --candidates", file=sys.stderr)
-            sys.exit(1)
-        if not workdir:
-            print("Error: --report requires --workdir", file=sys.stderr)
-            sys.exit(1)
-        return main_report(report_file, candidates_file, workdir)
+    if args.report:
+        if not args.candidates:
+            parser.error("--report requires --candidates")
+        return main_report(args.report, args.candidates, args.workdir)
 
     # --merge mode
-    if merge_mode:
-        return main_merge(merge_files, output_file, workdir)
+    if args.merge:
+        return main_merge(args.sources, args.output, args.workdir)
 
     # Default: prepare mode
-    if not source:
-        print(USAGE, end="", file=sys.stderr)
-        sys.exit(1)
+    if not args.sources or len(args.sources) != 1:
+        parser.error("prepare mode requires exactly one SOURCE argument")
 
-    if workdir is None:
-        print("Error: --workdir DIR is required", file=sys.stderr)
-        sys.exit(1)
-
-    return main_prepare(source, workdir)
+    return main_prepare(args.sources[0], args.workdir)
 
 
 def main_merge(merge_files, output_file, workdir):
     """Entry point for --merge mode."""
     if not merge_files:
-        print(
-            "Usage: search-bugs.py --merge <candidates1.json> <candidates2.json> ... --output FILE --workdir DIR",
-            file=sys.stderr,
-        )
+        print("Error: --merge requires at least one candidate file", file=sys.stderr)
         sys.exit(1)
 
     for filepath in merge_files:
         if not os.path.isfile(filepath):
             print(f"Error: file not found: {filepath}", file=sys.stderr)
             sys.exit(1)
-
-    if workdir is None:
-        print("Error: --workdir DIR is required", file=sys.stderr)
-        sys.exit(1)
 
     if not output_file:
         print("Error: --output FILE is required for --merge", file=sys.stderr)
