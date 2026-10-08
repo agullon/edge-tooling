@@ -64,13 +64,13 @@ def extract_test_ids(error_signature):
 _JIRA_SCOPE = "((project = OCPBUGS AND component = MicroShift) OR project = USHIFT) AND issuetype = Bug"
 
 
-def build_search_a_jql(keyword):
-    """Build JQL for Search A: open bugs matching keyword."""
+def build_search_jql_open_match_keyword(keyword):
+    """Build JQL for open bugs matching keyword (for duplicate detection)."""
     return f'{_JIRA_SCOPE} AND text ~ "{keyword}" AND status not in (Closed, Verified)'
 
 
-def build_search_b_jql(test_id, ocp_prefixed=False):
-    """Build JQL for Search B: open bugs matching test ID (bare or OCP-prefixed)."""
+def build_search_jql_open_match_test_id(test_id, ocp_prefixed=False):
+    """Build JQL for open bugs matching test ID (bare or OCP-prefixed, for duplicate detection)."""
     if ocp_prefixed:
         term = f"OCP-{test_id}"
     else:
@@ -78,17 +78,17 @@ def build_search_b_jql(test_id, ocp_prefixed=False):
     return f'{_JIRA_SCOPE} AND text ~ "{term}" AND status not in (Closed, Verified)'
 
 
-def build_search_c_jql(keyword):
-    """Build JQL for Search C: closed/verified bugs matching keyword (regressions)."""
+def build_search_jql_closed_match_keyword(keyword):
+    """Build JQL for closed/verified bugs matching keyword (for regression detection)."""
     return f'{_JIRA_SCOPE} AND text ~ "{keyword}" AND status in (Closed, Verified) ORDER BY updated DESC'
 
 
-def build_open_bugs_jql():
-    """Build JQL for broad open-bugs query."""
+def build_search_jql_open_all():
+    """Build JQL for broad open-bugs query (all open bugs in scope)."""
     return f'{_JIRA_SCOPE} AND status not in (Closed, Verified) ORDER BY updated DESC'
 
 
-def _issue_to_entry(issue, include_priority_created=False):
+def _convert_jira_issue_to_entry(issue, include_priority_created=False):
     """Convert a Jira API issue dict to the bug-matches entry format.
 
     Truncates 'updated' and 'created' to YYYY-MM-DD so categorize_candidate's
@@ -115,7 +115,7 @@ def _issue_to_entry(issue, include_priority_created=False):
     return entry
 
 
-def search_candidate(cand, search_fn=None):
+def find_jira_bugs_for_candidate(cand, search_fn=None):
     """Search Jira for bugs matching one candidate's keywords and test IDs.
 
     Returns {duplicates: [...], regressions: [...]}.
@@ -128,38 +128,38 @@ def search_candidate(cand, search_fn=None):
     keywords = extract_keywords(error_signature)
     test_ids = extract_test_ids(error_signature)
 
-    # Search A: open bugs by keyword (top 3 keywords)
+    # Find open bugs by keyword (top 3 keywords) → potential duplicates
     duplicates_dict = {}
     for kw in keywords[:3]:
-        jql = build_search_a_jql(kw)
+        jql = build_search_jql_open_match_keyword(kw)
         issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=5)
         if issues:
             for iss in issues:
                 key = iss.get("key")
                 if key and key not in duplicates_dict:
-                    duplicates_dict[key] = _issue_to_entry(iss)
+                    duplicates_dict[key] = _convert_jira_issue_to_entry(iss)
 
-    # Search B: open bugs by test ID (both bare and OCP-prefixed forms)
+    # Find open bugs by test ID (both bare and OCP-prefixed forms) → potential duplicates
     for tid in test_ids:
         for ocp_prefixed in [False, True]:
-            jql = build_search_b_jql(tid, ocp_prefixed=ocp_prefixed)
+            jql = build_search_jql_open_match_test_id(tid, ocp_prefixed=ocp_prefixed)
             issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=5)
             if issues:
                 for iss in issues:
                     key = iss.get("key")
                     if key and key not in duplicates_dict:
-                        duplicates_dict[key] = _issue_to_entry(iss)
+                        duplicates_dict[key] = _convert_jira_issue_to_entry(iss)
 
-    # Search C: closed/verified bugs by keyword (top 2 keywords) → regressions
+    # Find closed bugs by keyword (top 2 keywords) → potential regressions
     regressions_dict = {}
     for kw in keywords[:2]:
-        jql = build_search_c_jql(kw)
+        jql = build_search_jql_closed_match_keyword(kw)
         issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=5)
         if issues:
             for iss in issues:
                 key = iss.get("key")
                 if key and key not in regressions_dict:
-                    regressions_dict[key] = _issue_to_entry(iss)
+                    regressions_dict[key] = _convert_jira_issue_to_entry(iss)
 
     return {
         "duplicates": list(duplicates_dict.values()),
@@ -167,7 +167,7 @@ def search_candidate(cand, search_fn=None):
     }
 
 
-def search_source(candidates_data, search_fn=None, include_open_bugs=False):
+def find_jira_bugs_for_source(candidates_data, search_fn=None, include_open_bugs=False):
     """Search Jira for all candidates in a source.
 
     Returns bug-matches dict: {source, date, candidates, open_bugs}.
@@ -182,7 +182,7 @@ def search_source(candidates_data, search_fn=None, include_open_bugs=False):
 
     result_candidates = []
     for cand in candidates:
-        search_result = search_candidate(cand, search_fn=search_fn)
+        search_result = find_jira_bugs_for_candidate(cand, search_fn=search_fn)
         result_candidates.append({
             "error_signature": cand.get("error_signature", ""),
             "severity": cand.get("severity"),
@@ -201,10 +201,10 @@ def search_source(candidates_data, search_fn=None, include_open_bugs=False):
 
     # Optional broad open-bugs query (only for first source to avoid redundant queries)
     if include_open_bugs:
-        jql = build_open_bugs_jql()
+        jql = build_search_jql_open_all()
         issues = search_fn(jql, fields="summary,status,assignee,updated,priority,created", max_results=50)
         if issues:
-            result["open_bugs"] = [_issue_to_entry(iss, include_priority_created=True) for iss in issues]
+            result["open_bugs"] = [_convert_jira_issue_to_entry(iss, include_priority_created=True) for iss in issues]
         else:
             result["open_bugs"] = []
 
@@ -1117,7 +1117,7 @@ def main_search(source, workdir):
             file=sys.stderr,
         )
         # Write empty results
-        result = search_source(candidates_data, search_fn=lambda *a, **k: None, include_open_bugs=False)
+        result = find_jira_bugs_for_source(candidates_data, search_fn=lambda *a, **k: None, include_open_bugs=False)
         # Override to ensure all arrays are empty
         for cand in result["candidates"]:
             cand["duplicates"] = []
@@ -1125,7 +1125,7 @@ def main_search(source, workdir):
         result["open_bugs"] = []
     else:
         # Run actual searches (include_open_bugs=True for first source)
-        result = search_source(candidates_data, include_open_bugs=True)
+        result = find_jira_bugs_for_source(candidates_data, include_open_bugs=True)
 
     output_path = os.path.join(bugs_dir, f"bug-matches-{source}.json")
     with open(output_path, "w") as f:
@@ -1213,14 +1213,14 @@ def main_pipeline(sources_str, workdir):
                 "Set credentials to enable Jira bug search.",
                 file=sys.stderr,
             )
-            result = search_source(candidates_data, search_fn=lambda *a, **k: None, include_open_bugs=False)
+            result = find_jira_bugs_for_source(candidates_data, search_fn=lambda *a, **k: None, include_open_bugs=False)
             for cand in result["candidates"]:
                 cand["duplicates"] = []
                 cand["regressions"] = []
             result["open_bugs"] = []
         else:
             # Only include open_bugs for first source
-            result = search_source(candidates_data, include_open_bugs=(i == 0))
+            result = find_jira_bugs_for_source(candidates_data, include_open_bugs=(i == 0))
 
         # Write bug-matches
         output_path = os.path.join(bugs_dir, f"bug-matches-{source}.json")

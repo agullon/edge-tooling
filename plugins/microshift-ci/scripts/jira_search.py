@@ -9,6 +9,7 @@ JIRA_USERNAME and JIRA_API_TOKEN environment variables.
 import base64
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -66,7 +67,7 @@ def search(jql: str, fields: str = "summary,status,assignee,updated", max_result
 
     try:
         req = urllib.request.Request(
-            f"{_JIRA_API}/search",
+            f"{_JIRA_API}/search/jql",
             data=json.dumps(payload).encode(),
             headers=headers,
             method="POST",
@@ -76,11 +77,15 @@ def search(jql: str, fields: str = "summary,status,assignee,updated", max_result
             return data.get("issues", [])
 
     except urllib.error.HTTPError as e:
+        print(f"[jira_search] HTTP {e.code} error: {e.reason}", file=sys.stderr)
         if e.code == 401:
             # Authentication failed
             return None
         # Other HTTP errors
         return None
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError):
-        # Network error, timeout, malformed response
+    except urllib.error.URLError as e:
+        print(f"[jira_search] Network error: {e.reason}", file=sys.stderr)
+        return None
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        print(f"[jira_search] Error: {e}", file=sys.stderr)
         return None

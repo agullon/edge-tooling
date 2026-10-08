@@ -203,8 +203,8 @@ class DecisionPolicyTests(unittest.TestCase):
 class JiraSearchTests(unittest.TestCase):
     """In-process tests for Jira search functions (JQL builders, search logic)."""
 
-    def test_issue_to_entry_truncates_dates(self):
-        """_issue_to_entry truncates updated/created to YYYY-MM-DD."""
+    def test_convert_jira_issue_to_entry_truncates_dates(self):
+        """_convert_jira_issue_to_entry truncates updated/created to YYYY-MM-DD."""
         issue = {
             "key": "USHIFT-123",
             "fields": {
@@ -216,34 +216,34 @@ class JiraSearchTests(unittest.TestCase):
                 "priority": {"name": "Major"},
             }
         }
-        entry = _search_bugs._issue_to_entry(issue, include_priority_created=True)
+        entry = _search_bugs._convert_jira_issue_to_entry(issue, include_priority_created=True)
         self.assertEqual(entry["updated"], "2026-08-09")
         self.assertEqual(entry["created"], "2026-07-01")
         self.assertEqual(entry["priority"], "Major")
 
     def test_jql_builders_have_correct_filters(self):
-        """JQL queries filter status correctly for A/B (open) vs C (closed)."""
-        # Search A: open bugs by keyword
-        jql_a = _search_bugs.build_search_a_jql("greenboot")
+        """JQL queries filter status correctly for open vs closed bugs."""
+        # Open bugs by keyword (for duplicates)
+        jql_a = _search_bugs.build_search_jql_open_match_keyword("greenboot")
         self.assertIn("status not in (Closed, Verified)", jql_a)
         self.assertIn('text ~ "greenboot"', jql_a)
 
-        # Search B: open bugs by test ID
-        jql_b_bare = _search_bugs.build_search_b_jql("68256", ocp_prefixed=False)
+        # Open bugs by test ID (for duplicates)
+        jql_b_bare = _search_bugs.build_search_jql_open_match_test_id("68256", ocp_prefixed=False)
         self.assertIn("status not in (Closed, Verified)", jql_b_bare)
         self.assertIn('text ~ "68256"', jql_b_bare)
 
-        jql_b_ocp = _search_bugs.build_search_b_jql("68256", ocp_prefixed=True)
+        jql_b_ocp = _search_bugs.build_search_jql_open_match_test_id("68256", ocp_prefixed=True)
         self.assertIn("status not in (Closed, Verified)", jql_b_ocp)
         self.assertIn('text ~ "OCP-68256"', jql_b_ocp)
 
-        # Search C: closed/verified bugs by keyword (regressions)
-        jql_c = _search_bugs.build_search_c_jql("greenboot")
+        # Closed bugs by keyword (for regressions)
+        jql_c = _search_bugs.build_search_jql_closed_match_keyword("greenboot")
         self.assertIn("status in (Closed, Verified)", jql_c)
         self.assertIn('text ~ "greenboot"', jql_c)
 
-    def test_search_candidate_emits_both_test_id_forms(self):
-        """search_candidate queries both bare '68256' and 'OCP-68256' forms."""
+    def test_find_jira_bugs_for_candidate_emits_both_test_id_forms(self):
+        """find_jira_bugs_for_candidate queries both bare '68256' and 'OCP-68256' forms."""
         queries_run = []
 
         def fake_search(jql, **kwargs):
@@ -251,7 +251,7 @@ class JiraSearchTests(unittest.TestCase):
             return []  # empty results
 
         cand = {"error_signature": "test OCP-68256 fails"}
-        _search_bugs.search_candidate(cand, search_fn=fake_search)
+        _search_bugs.find_jira_bugs_for_candidate(cand, search_fn=fake_search)
 
         # Should have queried both "68256" and "OCP-68256"
         bare_queries = [q for q in queries_run if 'text ~ "68256"' in q]
@@ -259,8 +259,8 @@ class JiraSearchTests(unittest.TestCase):
         self.assertGreater(len(bare_queries), 0, "Should query bare test ID")
         self.assertGreater(len(ocp_queries), 0, "Should query OCP-prefixed test ID")
 
-    def test_search_candidate_dedups_by_key(self):
-        """search_candidate dedups duplicates and regressions by key."""
+    def test_find_jira_bugs_for_candidate_dedups_by_key(self):
+        """find_jira_bugs_for_candidate dedups duplicates and regressions by key."""
         def fake_search(jql, **kwargs):
             if "status not in" in jql:  # open bugs (A or B)
                 return [
@@ -278,7 +278,7 @@ class JiraSearchTests(unittest.TestCase):
                 ]
 
         cand = {"error_signature": "greenboot timeout"}
-        result = _search_bugs.search_candidate(cand, search_fn=fake_search)
+        result = _search_bugs.find_jira_bugs_for_candidate(cand, search_fn=fake_search)
 
         # Should dedup USHIFT-100 in duplicates
         self.assertEqual(len(result["duplicates"]), 1)
@@ -288,8 +288,8 @@ class JiraSearchTests(unittest.TestCase):
         self.assertEqual(len(result["regressions"]), 1)
         self.assertEqual(result["regressions"][0]["key"], "USHIFT-200")
 
-    def test_search_source_preserves_candidate_fields(self):
-        """search_source output includes required fields for bug-matches contract."""
+    def test_find_jira_bugs_for_source_preserves_candidate_fields(self):
+        """find_jira_bugs_for_source output includes required fields for bug-matches contract."""
         def fake_search(jql, **kwargs):
             return []
 
@@ -301,7 +301,7 @@ class JiraSearchTests(unittest.TestCase):
             ]
         }
 
-        result = _search_bugs.search_source(candidates_data, search_fn=fake_search, include_open_bugs=False)
+        result = _search_bugs.find_jira_bugs_for_source(candidates_data, search_fn=fake_search, include_open_bugs=False)
 
         self.assertEqual(result["source"], "4.22")
         self.assertEqual(len(result["candidates"]), 1)
@@ -314,8 +314,8 @@ class JiraSearchTests(unittest.TestCase):
         self.assertIn("duplicates", cand)
         self.assertIn("regressions", cand)
 
-    def test_search_source_includes_open_bugs_when_requested(self):
-        """search_source includes top-level open_bugs when include_open_bugs=True."""
+    def test_find_jira_bugs_for_source_includes_open_bugs_when_requested(self):
+        """find_jira_bugs_for_source includes top-level open_bugs when include_open_bugs=True."""
         def fake_search(jql, **kwargs):
             if "status not in (Closed, Verified) ORDER BY" in jql:  # broad open-bugs query
                 return [
@@ -326,7 +326,7 @@ class JiraSearchTests(unittest.TestCase):
             return []
 
         candidates_data = {"source": "4.22", "candidates": []}
-        result = _search_bugs.search_source(candidates_data, search_fn=fake_search, include_open_bugs=True)
+        result = _search_bugs.find_jira_bugs_for_source(candidates_data, search_fn=fake_search, include_open_bugs=True)
 
         self.assertIn("open_bugs", result)
         self.assertEqual(len(result["open_bugs"]), 1)
@@ -340,7 +340,7 @@ class JiraSearchTests(unittest.TestCase):
             return None
 
         cand = {"error_signature": "test fails"}
-        result = _search_bugs.search_candidate(cand, search_fn=no_creds_search)
+        result = _search_bugs.find_jira_bugs_for_candidate(cand, search_fn=no_creds_search)
 
         # Should handle None gracefully and return empty arrays
         self.assertEqual(result["duplicates"], [])
