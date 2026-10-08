@@ -576,7 +576,7 @@ def merge_candidate_files(filepaths, workdir=None):
         if other_sigs:
             entry["merged_signatures"] = other_sigs
         if all_duplicates:
-            entry["duplicates"] = list(all_duplicates.values())
+            entry["duplicates"] = sorted(all_duplicates.values(), key=lambda d: d.get("key", ""))
         if all_regressions:
             entry["regressions"] = list(all_regressions.values())
 
