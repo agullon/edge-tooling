@@ -43,6 +43,15 @@ to_image() {
     fi
 }
 
+release_from_job_name() {
+    local name="$1"
+    # Bash's regex match uses the first occurrence in the name. This preserves
+    # the release of a nightly job even if a later segment mentions a version.
+    if [[ "$name" =~ (nightly-|release-)([0-9]+\.[0-9]+) ]]; then
+        echo "${BASH_REMATCH[2]}"
+    fi
+}
+
 detect_release() {
     local version_tag="${1:-}"
 
@@ -51,14 +60,18 @@ detect_release() {
         return
     fi
 
-    for f in "$JOB_FILE" "$JOB_FILE_LVMS" "$JOB_FILE_Z" "$JOB_FILE_Y"; do
+    # The committed LVMS entry is a seed, not evidence of the user's current
+    # release. In particular it must not choose a release for --refresh.
+    for f in "$JOB_FILE" "$JOB_FILE_Z" "$JOB_FILE_Y"; do
         if [[ -f "$f" ]]; then
-            local from_jobs
-            from_jobs=$(sed -nE 's/.*(nightly-|release-)([0-9]+\.[0-9]+).*/\2/p' "$f" | head -1)
-            if [[ -n "$from_jobs" ]]; then
-                echo "$from_jobs"
-                return
-            fi
+            local job from_jobs
+            while IFS= read -r job; do
+                from_jobs=$(release_from_job_name "$job")
+                if [[ -n "$from_jobs" ]]; then
+                    echo "$from_jobs"
+                    return
+                fi
+            done < "$f"
         fi
     done
 
@@ -73,7 +86,7 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --list              List available jobs (numbered) and exit (version not required)"
-    echo "  --refresh           Update job files from Sippy and exit (auto-detects release from existing jobs)"
+    echo "  --refresh           Update job files from Sippy (infer release from existing regular/upgrade jobs)"
     echo "  --job <selector>    Launch specific jobs: all, number (3), list (3,7,12), or pattern (lvms)"
     echo "  --relaunch-failed   Re-launch failed jobs from the latest run"
     echo "  --stagger <secs>    Delay between each job launch (default: 10s API throttle only)"
@@ -87,7 +100,7 @@ usage() {
     echo ""
     echo "Examples:"
     echo "  $0 tna --list                                # list TNA jobs"
-    echo "  $0 tna --refresh                             # update TNA job lists (release from existing jobs)"
+    echo "  $0 tna --refresh                             # update TNA lists using existing jobs' release"
     echo "  $0 tna 4.23.0-rc.0 --refresh                 # update TNA job lists for a new release"
     echo "  $0 tnf 4.22.0-rc.0 --job all                 # launch regular jobs only"
     echo "  $0 tnf 4.22.0-rc.0 --job 3                   # launch job #3 only"
@@ -344,13 +357,24 @@ if ! $LIST_ONLY && [[ -n "$RELEASE_IMAGE" ]]; then
         JOB_NUMBER=0
         for file in "$JOB_FILE" "$JOB_FILE_LVMS" "$JOB_FILE_Z" "$JOB_FILE_Y"; do
             [[ ! -f "$file" ]] && continue
+            skip_upgrade_validation=false
+            if [[ -z "${INITIAL_IMAGE:-}" && ( "$file" == "$JOB_FILE_Z" || "$file" == "$JOB_FILE_Y" ) ]]; then
+                skip_upgrade_validation=true
+            fi
             while IFS= read -r job; do
                 [[ -z "$job" ]] && continue
                 JOB_NUMBER=$((JOB_NUMBER + 1))
                 [[ ",$JOB_FILTER," != *",$JOB_NUMBER,"* ]] && continue
-                job_release=$(printf '%s\n' "$job" | sed -nE 's/.*(nightly-|release-)([0-9]+\.[0-9]+).*/\2/p')
+                if $skip_upgrade_validation; then
+                    continue
+                fi
+                job_release=$(release_from_job_name "$job")
                 if [[ "$job" == *"-tnf-lvms-mno-qe-integration-tests" && -z "$REQUESTED_RELEASE" ]]; then
                     echo "Error: cannot determine the payload release for TNF LVMS job #$JOB_NUMBER"
+                    exit 1
+                fi
+                if [[ "$job" == *"-tnf-lvms-mno-qe-integration-tests" && -z "$job_release" ]]; then
+                    echo "Error: cannot determine the release of TNF LVMS job #$JOB_NUMBER"
                     exit 1
                 fi
                 if [[ -n "$job_release" && -n "$REQUESTED_RELEASE" && "$job_release" != "$REQUESTED_RELEASE" ]]; then
@@ -361,11 +385,15 @@ if ! $LIST_ONLY && [[ -n "$RELEASE_IMAGE" ]]; then
         done
         JOBS_RELEASE="$REQUESTED_RELEASE"
     elif [[ "$TOPOLOGY" == "tnf" && "$JOB_FILTER" == "lvms" ]]; then
-        if [[ ! -f "$JOB_FILE_LVMS" ]]; then
+        if [[ ! -s "$JOB_FILE_LVMS" ]]; then
             echo "Error: no TNF LVMS job is available; run './launch.sh tnf $REQUESTED_RELEASE --refresh'"
             exit 1
         fi
-        JOBS_RELEASE=$(sed -nE 's/.*release-([0-9]+\.[0-9]+)-nightly-.*/\1/p' "$JOB_FILE_LVMS" | head -1)
+        JOBS_RELEASE=$(release_from_job_name "$(head -1 "$JOB_FILE_LVMS")")
+        if [[ -z "$JOBS_RELEASE" ]]; then
+            echo "Error: cannot determine the release of the TNF LVMS job; run --refresh"
+            exit 1
+        fi
     elif [[ -n "$JOB_FILTER" && "$JOB_FILTER" != "all" ]]; then
         # A text selector may match a job in a different file than the first
         # Sippy list, so validate the matching jobs rather than that list.
@@ -376,9 +404,13 @@ if ! $LIST_ONLY && [[ -n "$RELEASE_IMAGE" ]]; then
             fi
             while IFS= read -r job; do
                 [[ -z "$job" || "$job" != *"$JOB_FILTER"* ]] && continue
-                job_release=$(printf '%s\n' "$job" | sed -nE 's/.*(nightly-|release-)([0-9]+\.[0-9]+).*/\2/p')
+                job_release=$(release_from_job_name "$job")
                 if [[ "$job" == *"-tnf-lvms-mno-qe-integration-tests" && -z "$REQUESTED_RELEASE" ]]; then
                     echo "Error: cannot determine the payload release for the TNF LVMS lane"
+                    exit 1
+                fi
+                if [[ "$job" == *"-tnf-lvms-mno-qe-integration-tests" && -z "$job_release" ]]; then
+                    echo "Error: cannot determine the release of the TNF LVMS job; run --refresh"
                     exit 1
                 fi
                 if [[ -n "$job_release" && -n "$REQUESTED_RELEASE" && "$job_release" != "$REQUESTED_RELEASE" ]]; then
@@ -547,8 +579,8 @@ job_selected() {
     fi
     if [[ "$job" == *"-tnf-lvms-mno-qe-integration-tests" ]]; then
         local job_release
-        job_release=$(printf '%s\n' "$job" | sed -nE 's/.*release-([0-9]+\.[0-9]+)-nightly-.*/\1/p')
-        [[ -n "$REQUESTED_RELEASE" && "$job_release" == "$REQUESTED_RELEASE" ]] || return 1
+        job_release=$(release_from_job_name "$job")
+        [[ -n "$REQUESTED_RELEASE" && "$job_release" == "$REQUESTED_RELEASE" ]] || return 2
     fi
     return 0
 }
@@ -576,6 +608,8 @@ if [[ -n "${INITIAL_IMAGE:-}" ]]; then
 fi
 LINE_NUM=0
 LAUNCHED_COUNT=0
+LVMS_SKIP_TOTAL=0
+LVMS_SKIP_TARGETS=""
 
 echo "=== Launching $TOPOLOGY jobs against $RELEASE_IMAGE ==="
 echo "    Run directory: $RUN_DIR"
@@ -603,7 +637,15 @@ launch_from_file() {
         [[ -z "$JOB" ]] && continue
         LINE_NUM=$((LINE_NUM + 1))
 
-        job_selected "$JOB" "$LINE_NUM" || continue
+        selection_status=0
+        job_selected "$JOB" "$LINE_NUM" || selection_status=$?
+        if (( selection_status != 0 )); then
+            if (( selection_status == 2 )); then
+                LVMS_SKIP_TOTAL=$((LVMS_SKIP_TOTAL + 1))
+                LVMS_SKIP_TARGETS="${LVMS_SKIP_TARGETS:+$LVMS_SKIP_TARGETS, }$(release_from_job_name "$JOB")"
+            fi
+            continue
+        fi
 
         COUNT=$((COUNT + 1))
         echo "[$COUNT] $JOB"
@@ -666,11 +708,20 @@ else
     fi
 fi
 
+if (( LVMS_SKIP_TOTAL > 0 )); then
+    echo "Skipped $LVMS_SKIP_TOTAL TNF LVMS lane(s) (targets ${LVMS_SKIP_TARGETS:-unknown}, payload ${REQUESTED_RELEASE:-unknown}) — run --refresh once a matching lane exists"
+fi
+
 echo ""
 
 if [[ "$COUNT" -eq 0 && -n "$JOB_FILTER" && "$JOB_FILTER" != "all" ]]; then
     echo "Error: no jobs matched selector '$JOB_FILTER'"
     echo "Run './launch.sh $TOPOLOGY --list' to see available jobs."
+    exit 1
+fi
+
+if [[ "$COUNT" -eq 0 && "$LVMS_SKIP_TOTAL" -gt 0 ]]; then
+    echo "Error: no jobs launched because no TNF LVMS lane matches the payload release"
     exit 1
 fi
 
