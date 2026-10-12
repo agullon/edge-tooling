@@ -173,7 +173,8 @@ lane exists in `openshift/release` and appears in Sippy, run
 The committed TNF LVMS entry is a seed for discovery, not a default release.
 On a fresh checkout, `tnf --refresh` therefore needs an explicit version. Once
 regular or upgrade job files exist, refresh can infer their release. During
-`--job all`, a stale LVMS entry is reported as skipped; if no jobs remain to
+`--job all` or a broad pattern such as `--job baremetalds`, a stale LVMS entry
+is reported as skipped; if no jobs remain to
 launch, the command exits with an error.
 
 Use `--job lvms` to launch only the lane matching the payload's minor release.

@@ -182,30 +182,9 @@ job_num_lookup() {
 
 # TSV columns: num, status, job_name, url, failure_reason, classification, pass_pct
 
-fetch_failure_reason() {
-    local url="$1" job_name="$2"
-    local gcs_base="${url/prow.ci.openshift.org\/view\/gs\//${GCSWEB_BASE}/}"
-    local junit_url="${gcs_base}/artifacts/junit_operator.xml"
-    local lvms_artifacts="${gcs_base}/artifacts/e2e-baremetalds-tnf-lvms-mno-qe-integration-tests"
-    local is_lvms=false
-
-    local xml
-    if [[ "$job_name" == *"-tnf-lvms-mno-qe-integration-tests" ]]; then
-        is_lvms=true
-        xml=$(curl -fsSL --max-time 15 \
-            "${lvms_artifacts}/lvms-tnf-mno-integration-test/artifacts/junit_results.xml" 2>/dev/null) || true
-    fi
-    if [[ -z "${xml:-}" ]]; then
-        xml=$(curl -fsSL --max-time 15 "$junit_url" 2>/dev/null) || true
-    fi
-
-    if [[ -z "$xml" ]]; then
-        echo "unable to fetch logs"
-        return
-    fi
-
-    local reason
-    reason=$(echo "$xml" | python3 -c "
+# Read JUnit from stdin and emit the first failure outside diagnostic steps.
+parse_junit_failure() {
+    python3 -c "
 import sys, xml.etree.ElementTree as ET
 try:
     tree = ET.parse(sys.stdin)
@@ -233,16 +212,51 @@ try:
         break
 except Exception:
     print('unable to parse junit')
-" 2>/dev/null) || true
+" 2>/dev/null || true
+}
+
+fetch_failure_reason() {
+    local url="$1" job_name="$2"
+    local gcs_base="${url/prow.ci.openshift.org\/view\/gs\//${GCSWEB_BASE}/}"
+    local junit_url="${gcs_base}/artifacts/junit_operator.xml"
+    local lvms_artifacts="${gcs_base}/artifacts/e2e-baremetalds-tnf-lvms-mno-qe-integration-tests"
+    local is_lvms=false
+    local xml="" reason=""
+
+    if [[ "$job_name" == *"-tnf-lvms-mno-qe-integration-tests" ]]; then
+        is_lvms=true
+        xml=$(curl -fsSL --max-time 15 \
+            "${lvms_artifacts}/lvms-tnf-mno-integration-test/artifacts/junit_results.xml" 2>/dev/null) || true
+        if [[ -n "$xml" ]]; then
+            reason=$(printf '%s\n' "$xml" | parse_junit_failure)
+        fi
+    fi
 
     # The lane's validator, rather than raw JUnit, decides which skips are
     # unexpected. A failed setup can leave an ordinary skip in JUnit without
     # that skip being the cause of the job failure.
-    if [[ -z "$reason" && "$is_lvms" == true ]]; then
-        local summary
+    if [[ "$is_lvms" == true && ( -z "$reason" || "$reason" == "unable to parse junit" ) ]]; then
+        local summary skip_reason
         summary=$(curl -fsSL --max-time 15 \
             "${lvms_artifacts}/baremetalds-two-node-fencing-lvms-mno-validate-results/artifacts/skip-summary.txt" 2>/dev/null) || true
-        reason=$(printf '%s\n' "$summary" | sed -n 's/^UNEXPECTED SKIP /Unexpected skip: /p' | head -1)
+        skip_reason=$(printf '%s\n' "$summary" | sed -n 's/^UNEXPECTED SKIP /Unexpected skip: /p' | head -1)
+        if [[ -n "$skip_reason" ]]; then
+            reason="$skip_reason"
+        fi
+    fi
+
+    # A passing or malformed suite can accompany a setup or post-step failure.
+    if [[ -z "$reason" || "$reason" == "unable to parse junit" ]]; then
+        local operator_xml operator_reason
+        operator_xml=$(curl -fsSL --max-time 15 "$junit_url" 2>/dev/null) || true
+        if [[ -n "$operator_xml" ]]; then
+            operator_reason=$(printf '%s\n' "$operator_xml" | parse_junit_failure)
+            if [[ -n "$operator_reason" && "$operator_reason" != "unable to parse junit" ]]; then
+                reason="$operator_reason"
+            elif [[ -z "$reason" ]]; then
+                reason="$operator_reason"
+            fi
+        fi
     fi
 
     if [[ -n "$reason" ]]; then

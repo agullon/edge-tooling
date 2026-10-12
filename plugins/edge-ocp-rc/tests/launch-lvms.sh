@@ -53,6 +53,8 @@ run_success pattern-5-0 'tnf-lvms-mno-qe-integration-tests' "$image_5_0" --job l
 run_success text-5-0 'tnf-lvms-mno-qe-integration-tests' "$image_5_0" --job mno
 run_success number-5-0 'tnf-lvms-mno-qe-integration-tests' "$image_5_0" --job 2
 run_success all-4-22 '1 jobs launched' "$image_4_22" --job all
+run_success broad-baremetalds '1 jobs launched' "$image_4_22" --job baremetalds
+run_success broad-e2e 'Skipped 1 TNF LVMS lane(s) (targets 5.0, payload 4.22)' "$image_4_22" --job e2e
 run_failure number-wrong-release 'selected job #2 targets 5.0' "$image_4_22" --job 2
 run_failure text-wrong-release 'targets 5.0' "$image_4_22" --job mno
 run_failure all-mixed-release 'job files are for 4.22' "$image_5_0" --job all

@@ -414,6 +414,11 @@ if ! $LIST_ONLY && [[ -n "$RELEASE_IMAGE" ]]; then
                     exit 1
                 fi
                 if [[ -n "$job_release" && -n "$REQUESTED_RELEASE" && "$job_release" != "$REQUESTED_RELEASE" ]]; then
+                    # Broad patterns can match a stale LVMS seed alongside
+                    # compatible jobs. Let job_selected report that lane as skipped.
+                    if [[ "$job" == *"-tnf-lvms-mno-qe-integration-tests" ]]; then
+                        continue
+                    fi
                     echo "Error: selected job '$job' targets $job_release, but you requested $REQUESTED_RELEASE"
                     exit 1
                 fi
