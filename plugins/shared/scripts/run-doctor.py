@@ -964,17 +964,17 @@ class DoctorPipeline:
                     timer.cancel()
 
                 if timed_out:
-                    self.message(f"WARNING: Bug search timed out after {limits['timeout']}s (non-fatal)")
-                    return True
+                    self.message(f"ERROR: Bug search timed out after {limits['timeout']}s")
+                    return False
                 if proc.returncode != 0:
-                    self.message(f"WARNING: Bug search failed with exit code {proc.returncode} (non-fatal)")
-                    return True
+                    self.message(f"ERROR: Bug search failed with exit code {proc.returncode}")
+                    return False
 
             log.info("Bug search completed successfully")
             return True
         except Exception as e:
-            self.message(f"WARNING: Bug search raised exception: {e} (non-fatal)")
-            return True
+            self.message(f"ERROR: Bug search raised exception: {e}")
+            return False
 
     def finalize(self):
         log.info("=== Stage: finalize ===")
@@ -1106,7 +1106,7 @@ class DoctorPipeline:
             ok = func()
             if not ok:
                 had_errors = True
-                if stage == "prepare":
+                if stage in ("prepare", "bugs"):
                     self.message(f"FATAL: Stage {stage} failed, aborting")
                     return 1
                 self.message(f"WARNING: Stage {stage} had errors, continuing")

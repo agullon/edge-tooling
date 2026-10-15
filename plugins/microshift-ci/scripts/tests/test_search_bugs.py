@@ -242,6 +242,11 @@ class JiraSearchTests(unittest.TestCase):
         self.assertIn("status in (Closed, Verified)", jql_c)
         self.assertIn('text ~ "greenboot"', jql_c)
 
+        inventory_jql = _search_bugs.build_search_jql_open_all()
+        self.assertIn("project = USHIFT", inventory_jql)
+        self.assertIn('labels = "microshift-ci-ai-generated"', inventory_jql)
+        self.assertNotIn("OCPBUGS", inventory_jql)
+
     def test_find_jira_bugs_for_candidate_emits_both_test_id_forms(self):
         """find_jira_bugs_for_candidate queries both bare '68256' and 'OCP-68256' forms."""
         queries_run = []
@@ -288,6 +293,67 @@ class JiraSearchTests(unittest.TestCase):
         self.assertEqual(len(result["regressions"]), 1)
         self.assertEqual(result["regressions"][0]["key"], "USHIFT-200")
 
+    def test_single_keyword_hit_is_not_accepted(self):
+        issue = {"key": "OCPBUGS-126892", "fields": {
+            "summary": "Unrelated generic timeout", "status": {"name": "New"},
+            "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
+
+        def fake_search(jql, **kwargs):
+            return [issue] if 'text ~ "greenboot"' in jql else []
+
+        result = _search_bugs.find_jira_bugs_for_candidate(
+            {"error_signature": "greenboot health timeout"}, search_fn=fake_search)
+        self.assertEqual(result["duplicates"], [])
+
+    def test_two_keyword_hits_are_accepted(self):
+        issue = {"key": "USHIFT-100", "fields": {
+            "summary": "Greenboot health timeout", "status": {"name": "New"},
+            "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
+
+        def fake_search(jql, **kwargs):
+            if ('text ~ "greenboot"' in jql
+                    or 'text ~ "health"' in jql):
+                return [issue]
+            return []
+
+        result = _search_bugs.find_jira_bugs_for_candidate(
+            {"error_signature": "greenboot health timeout"}, search_fn=fake_search)
+        self.assertEqual([d["key"] for d in result["duplicates"]], ["USHIFT-100"])
+
+    def test_ocp_test_id_hit_is_accepted(self):
+        issue = {"key": "OCPBUGS-100", "fields": {
+            "summary": "OCP-68256 failed", "status": {"name": "New"},
+            "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
+
+        def fake_search(jql, **kwargs):
+            return [issue] if 'text ~ "OCP-68256"' in jql else []
+
+        result = _search_bugs.find_jira_bugs_for_candidate(
+            {"error_signature": "OCP-68256 failed"}, search_fn=fake_search)
+        self.assertEqual([d["key"] for d in result["duplicates"]], ["OCPBUGS-100"])
+
+    def test_bare_id_requires_keyword(self):
+        issue = {"key": "USHIFT-68256", "fields": {
+            "summary": "Greenboot 68256", "status": {"name": "New"},
+            "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
+
+        def bare_only(jql, **kwargs):
+            return [issue] if 'text ~ "68256"' in jql else []
+
+        candidate = {"error_signature": "greenboot case 68256 failed"}
+        result = _search_bugs.find_jira_bugs_for_candidate(
+            candidate, search_fn=bare_only)
+        self.assertEqual(result["duplicates"], [])
+
+        def bare_and_keyword(jql, **kwargs):
+            if 'text ~ "68256"' in jql or 'text ~ "greenboot"' in jql:
+                return [issue]
+            return []
+
+        result = _search_bugs.find_jira_bugs_for_candidate(
+            candidate, search_fn=bare_and_keyword)
+        self.assertEqual([d["key"] for d in result["duplicates"]], ["USHIFT-68256"])
+
     def test_find_jira_bugs_for_source_preserves_candidate_fields(self):
         """find_jira_bugs_for_source output includes required fields for bug-matches contract."""
         def fake_search(jql, **kwargs):
@@ -333,18 +399,72 @@ class JiraSearchTests(unittest.TestCase):
         self.assertEqual(result["open_bugs"][0]["key"], "USHIFT-300")
         self.assertEqual(result["open_bugs"][0]["priority"], "Major")
 
-    def test_no_credentials_path_returns_none(self):
-        """When credentials are missing, search returns None gracefully."""
-        # Fake a search_fn that returns None (simulating missing credentials)
-        def no_creds_search(jql, **kwargs):
-            return None
+    def test_search_failure_propagates(self):
+        def failed_search(jql, **kwargs):
+            raise _search_bugs.jira_search.JiraSearchError("network failed")
 
-        cand = {"error_signature": "test fails"}
-        result = _search_bugs.find_jira_bugs_for_candidate(cand, search_fn=no_creds_search)
+        with self.assertRaises(_search_bugs.jira_search.JiraSearchError):
+            _search_bugs.find_jira_bugs_for_candidate(
+                {"error_signature": "test fails"}, search_fn=failed_search)
 
-        # Should handle None gracefully and return empty arrays
-        self.assertEqual(result["duplicates"], [])
-        self.assertEqual(result["regressions"], [])
+
+class JiraMergeTests(unittest.TestCase):
+    @staticmethod
+    def candidate(signature, duplicates=None, regressions=None):
+        return {"error_signature": signature,
+                "duplicates": [{"key": key} for key in (duplicates or [])],
+                "regressions": [{"key": key} for key in (regressions or [])]}
+
+    def test_jira_bridge_does_not_merge_all_groups(self):
+        groups = [
+            [self.candidate("a", ["X"])],
+            [self.candidate("b", ["X", "Y"])],
+            [self.candidate("c", ["Y"])],
+        ]
+        merged = _search_bugs._merge_groups_by_jira(groups)
+        self.assertEqual(sorted(len(group) for group in merged), [1, 2])
+
+    def test_regressions_never_merge_groups(self):
+        groups = [
+            [self.candidate("a", regressions=["X"])],
+            [self.candidate("b", regressions=["X"])],
+        ]
+        self.assertEqual(len(_search_bugs._merge_groups_by_jira(groups)), 2)
+
+
+class PipelineFailureTests(unittest.TestCase):
+    def test_missing_credentials_fails_without_publishing_matches(self):
+        with tempfile.TemporaryDirectory() as workdir:
+            jobs = Path(workdir) / "jobs"
+            jobs.mkdir()
+            job = [{
+                "severity": 3,
+                "stack_layer": "test",
+                "step_name": "e2e",
+                "error_signature": "greenboot health timeout",
+                "root_cause": "health check timed out",
+                "raw_error": "timeout",
+                "infrastructure_failure": False,
+                "job_url": "https://prow.example/1",
+                "job_name": "periodic-ci-microshift-release-4.22",
+                "release": "4.22",
+                "remediation": "inspect health check",
+                "finished": "2026-09-01",
+            }]
+            (jobs / "release-4.22-job-0-1.json").write_text(json.dumps(job))
+            env = dict(os.environ)
+            env.pop("JIRA_USERNAME", None)
+            env.pop("JIRA_API_TOKEN", None)
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--pipeline", "4.22",
+                 "--workdir", workdir],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("JIRA_USERNAME and JIRA_API_TOKEN are required",
+                          proc.stderr)
+            self.assertFalse(
+                (Path(workdir) / "bugs" / "bug-matches-4.22.json").exists())
 
 
 if __name__ == "__main__":

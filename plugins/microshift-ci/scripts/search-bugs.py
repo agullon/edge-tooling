@@ -84,8 +84,10 @@ def build_search_jql_closed_match_keyword(keyword):
 
 
 def build_search_jql_open_all():
-    """Build JQL for broad open-bugs query (all open bugs in scope)."""
-    return f'{_JIRA_SCOPE} AND status not in (Closed, Verified) ORDER BY updated DESC'
+    """Build the legacy AI-generated open-bug inventory query."""
+    return ('project = USHIFT AND issuetype = Bug '
+            'AND labels = "microshift-ci-ai-generated" '
+            'AND status not in (Closed, Verified) ORDER BY updated DESC')
 
 
 def _convert_jira_issue_to_entry(issue, include_priority_created=False):
@@ -125,57 +127,76 @@ def find_jira_bugs_for_candidate(cand, search_fn=None):
         search_fn = jira_search.search
 
     error_signature = cand.get("error_signature", "")
-    keywords = extract_keywords(error_signature)
     test_ids = extract_test_ids(error_signature)
+    id_terms = set(test_ids) | {f"ocp-{test_id}" for test_id in test_ids}
+    keywords = [kw for kw in extract_keywords(error_signature)
+                if kw.lower() not in id_terms]
 
-    # Find open bugs by keyword (top 3 keywords) → potential duplicates
-    duplicates_dict = {}
+    # Retrieval is deliberately broad; acceptance requires compound evidence.
+    open_hits = {}
+
+    def record(hits, issue, evidence_type, evidence_value):
+        key = issue.get("key")
+        if not key:
+            return
+        item = hits.setdefault(key, {"issue": issue, "keywords": set(),
+                                    "bare_ids": set(), "ocp_ids": set()})
+        item[evidence_type].add(evidence_value)
+
     for kw in keywords[:3]:
         jql = build_search_jql_open_match_keyword(kw)
         issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=5)
-        if issues:
-            for iss in issues:
-                key = iss.get("key")
-                if key and key not in duplicates_dict:
-                    duplicates_dict[key] = _convert_jira_issue_to_entry(iss)
+        for iss in issues:
+            record(open_hits, iss, "keywords", kw)
 
     # Find open bugs by test ID (both bare and OCP-prefixed forms) → potential duplicates
     for tid in test_ids:
         for ocp_prefixed in [False, True]:
             jql = build_search_jql_open_match_test_id(tid, ocp_prefixed=ocp_prefixed)
             issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=5)
-            if issues:
-                for iss in issues:
-                    key = iss.get("key")
-                    if key and key not in duplicates_dict:
-                        duplicates_dict[key] = _convert_jira_issue_to_entry(iss)
+            for iss in issues:
+                record(open_hits, iss, "ocp_ids" if ocp_prefixed else "bare_ids", tid)
 
     # Find closed bugs by keyword (top 2 keywords) → potential regressions
-    regressions_dict = {}
+    closed_hits = {}
     for kw in keywords[:2]:
         jql = build_search_jql_closed_match_keyword(kw)
         issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=5)
-        if issues:
-            for iss in issues:
-                key = iss.get("key")
-                if key and key not in regressions_dict:
-                    regressions_dict[key] = _convert_jira_issue_to_entry(iss)
+        for iss in issues:
+            record(closed_hits, iss, "keywords", kw)
+
+    def accepted(hits):
+        result = []
+        for key in sorted(hits):
+            evidence = hits[key]
+            if (evidence["ocp_ids"] or len(evidence["keywords"]) >= 2
+                    or (evidence["bare_ids"] and evidence["keywords"])):
+                result.append(_convert_jira_issue_to_entry(evidence["issue"]))
+        return result
 
     return {
-        "duplicates": list(duplicates_dict.values()),
-        "regressions": list(regressions_dict.values()),
+        "duplicates": accepted(open_hits),
+        "regressions": accepted(closed_hits),
     }
 
 
-def find_jira_bugs_for_source(candidates_data, search_fn=None, include_open_bugs=False):
+def find_jira_bugs_for_source(candidates_data, search_fn=None,
+                              include_open_bugs=False, search_all_fn=None):
     """Search Jira for all candidates in a source.
 
     Returns bug-matches dict: {source, date, candidates, open_bugs}.
     Each candidate gets {error_signature, severity, failure_type, step_name,
     affected_jobs, duplicates, regressions}.
     """
+    injected_search = search_fn is not None
     if search_fn is None:
         search_fn = jira_search.search
+    if search_all_fn is None:
+        if injected_search:
+            search_all_fn = lambda jql, fields: search_fn(
+                jql, fields=fields, max_results=50)
+        else:
+            search_all_fn = jira_search.search_all
 
     source = candidates_data.get("source", "")
     candidates = candidates_data.get("candidates", [])
@@ -199,14 +220,15 @@ def find_jira_bugs_for_source(candidates_data, search_fn=None, include_open_bugs
         "candidates": result_candidates,
     }
 
-    # Optional broad open-bugs query (only for first source to avoid redundant queries)
+    # Query the legacy labeled inventory once, on the first source.
     if include_open_bugs:
         jql = build_search_jql_open_all()
-        issues = search_fn(jql, fields="summary,status,assignee,updated,priority,created", max_results=50)
-        if issues:
-            result["open_bugs"] = [_convert_jira_issue_to_entry(iss, include_priority_created=True) for iss in issues]
-        else:
-            result["open_bugs"] = []
+        issues = search_all_fn(
+            jql, fields="summary,status,assignee,updated,priority,created")
+        result["open_bugs"] = [
+            _convert_jira_issue_to_entry(iss, include_priority_created=True)
+            for iss in issues
+        ]
 
     return result
 
@@ -373,65 +395,49 @@ def find_job_files(workdir, source):
 
 
 def _jira_keys(candidate):
-    """Extract all Jira issue keys from a candidate's duplicates and regressions."""
+    """Extract accepted open Jira keys; regressions never merge failures."""
     keys = set()
     for d in candidate.get("duplicates", []):
         if d.get("key"):
             keys.add(d["key"])
-    for r in candidate.get("regressions", []):
-        if r.get("key"):
-            keys.add(r["key"])
     return keys
 
 
 def _merge_groups_by_jira(groups):
-    """Merge groups that share any Jira issue key across duplicates/regressions.
-
-    Uses union-find to transitively merge: if group A shares a key with
-    group B, and group B shares a different key with group C, all three
-    merge.  Operates across step-name boundaries.
-    """
-    parent = list(range(len(groups)))
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        a, b = find(a), find(b)
-        if a != b:
-            parent[b] = a
-
-    key_to_groups = {}
-    for i, group in enumerate(groups):
-        for cand in group:
-            for key in _jira_keys(cand):
-                key_to_groups.setdefault(key, set()).add(i)
-
-    for indices in key_to_groups.values():
-        indices = list(indices)
-        for j in range(1, len(indices)):
-            union(indices[0], indices[j])
-
-    merged = {}
-    for i, group in enumerate(groups):
-        root = find(i)
-        merged.setdefault(root, []).extend(group)
-
-    return list(merged.values())
+    """Merge groups only when every member shares one accepted open Jira key."""
+    result = []
+    for group in groups:
+        group_keys = set.intersection(*(_jira_keys(c) for c in group)) if group else set()
+        merged = False
+        for index, (existing, shared_keys) in enumerate(result):
+            common = shared_keys & group_keys
+            if common:
+                result[index] = (existing + group, common)
+                merged = True
+                break
+        if not merged:
+            result.append((list(group), group_keys))
+    return [group for group, _ in result]
 
 
-def _load_jira_lookup(workdir):
+def _load_jira_lookup(workdir, sources=None):
     """Load Jira duplicates/regressions from bug mapping files.
 
     Returns a dict mapping error_signature to {duplicates, regressions}.
     Bug mapping files live under ${workdir}/bugs/.
     """
     lookup = {}
-    pattern = os.path.join(workdir, "bugs", "bug-matches-*.json")
-    for filepath in sorted(glob_mod.glob(pattern)):
+    if sources is None:
+        pattern = os.path.join(workdir, "bugs", "bug-matches-*.json")
+        filepaths = sorted(glob_mod.glob(pattern))
+    else:
+        filepaths = [
+            os.path.join(workdir, "bugs", f"bug-matches-{source}.json")
+            for source in sources
+        ]
+    for filepath in filepaths:
+        if not os.path.isfile(filepath):
+            continue
         with open(filepath, "r") as f:
             data = json.load(f)
         for cand in data.get("candidates", []):
@@ -484,7 +490,7 @@ def merge_candidate_files(filepaths, workdir=None):
     # duplicates/regressions since candidate files never carry Jira data.
     jira_injected = 0
     if workdir:
-        jira_lookup = _load_jira_lookup(workdir)
+        jira_lookup = _load_jira_lookup(workdir, sources)
         for cand in all_candidates:
             sig = cand.get("error_signature", "")
             if sig in jira_lookup:
@@ -1108,24 +1114,10 @@ def main_search(source, workdir):
     with open(candidates_path) as f:
         candidates_data = json.load(f)
 
-    # Check credentials
     if not jira_search.credentials_available():
-        print(
-            "WARNING: JIRA_USERNAME and/or JIRA_API_TOKEN not set.\n"
-            "Writing bug-matches file with empty duplicates/regressions.\n"
-            "Set credentials to enable Jira bug search.",
-            file=sys.stderr,
-        )
-        # Write empty results
-        result = find_jira_bugs_for_source(candidates_data, search_fn=lambda *a, **k: None, include_open_bugs=False)
-        # Override to ensure all arrays are empty
-        for cand in result["candidates"]:
-            cand["duplicates"] = []
-            cand["regressions"] = []
-        result["open_bugs"] = []
-    else:
-        # Run actual searches (include_open_bugs=True for first source)
-        result = find_jira_bugs_for_source(candidates_data, include_open_bugs=True)
+        raise jira_search.JiraSearchError(
+            "JIRA_USERNAME and JIRA_API_TOKEN are required")
+    result = find_jira_bugs_for_source(candidates_data, include_open_bugs=True)
 
     output_path = os.path.join(bugs_dir, f"bug-matches-{source}.json")
     with open(output_path, "w") as f:
@@ -1165,35 +1157,36 @@ def main_pipeline(sources_str, workdir):
 
     print(f"Pipeline sources: {', '.join(sources)}", file=sys.stderr)
 
-    # Step 1: Prepare candidates for each source
+    # Step 1: Prepare fresh candidates for each source.
     candidate_files = []
+    active_sources = []
     for source in sources:
         print(f"\n=== Preparing candidates for {source} ===", file=sys.stderr)
         bugs_dir = os.path.join(workdir, "bugs")
         candidate_path = os.path.join(bugs_dir, f"bug-candidates-{source}.json")
 
-        # Check if already exists (skip prepare if so)
-        if os.path.isfile(candidate_path):
-            print(f"Using existing candidates: {candidate_path}", file=sys.stderr)
-            candidate_files.append(candidate_path)
-            continue
-
-        # Run prepare
         try:
             main_prepare(source, workdir)
             candidate_files.append(candidate_path)
+            active_sources.append(source)
         except SystemExit as e:
             if e.code != 0:
                 print(f"WARNING: Failed to prepare candidates for {source}, skipping", file=sys.stderr)
                 continue
             candidate_files.append(candidate_path)
+            active_sources.append(source)
 
     if not candidate_files:
         print("Error: No candidates prepared", file=sys.stderr)
         sys.exit(1)
 
-    # Step 2: Search Jira for each source (open_bugs only for first)
-    for i, source in enumerate(sources):
+    if not jira_search.credentials_available():
+        raise jira_search.JiraSearchError(
+            "JIRA_USERNAME and JIRA_API_TOKEN are required")
+
+    # Step 2: Complete every Jira search before publishing any mapping.
+    match_results = []
+    for i, source in enumerate(active_sources):
         bugs_dir = os.path.join(workdir, "bugs")
         candidate_path = os.path.join(bugs_dir, f"bug-candidates-{source}.json")
         if not os.path.isfile(candidate_path):
@@ -1205,24 +1198,11 @@ def main_pipeline(sources_str, workdir):
         with open(candidate_path) as f:
             candidates_data = json.load(f)
 
-        # Search (with credentials check)
-        if not jira_search.credentials_available():
-            print(
-                "WARNING: JIRA_USERNAME and/or JIRA_API_TOKEN not set.\n"
-                "Writing bug-matches with empty duplicates/regressions.\n"
-                "Set credentials to enable Jira bug search.",
-                file=sys.stderr,
-            )
-            result = find_jira_bugs_for_source(candidates_data, search_fn=lambda *a, **k: None, include_open_bugs=False)
-            for cand in result["candidates"]:
-                cand["duplicates"] = []
-                cand["regressions"] = []
-            result["open_bugs"] = []
-        else:
-            # Only include open_bugs for first source
-            result = find_jira_bugs_for_source(candidates_data, include_open_bugs=(i == 0))
+        result = find_jira_bugs_for_source(
+            candidates_data, include_open_bugs=(i == 0))
+        match_results.append((source, result))
 
-        # Write bug-matches
+    for source, result in match_results:
         output_path = os.path.join(bugs_dir, f"bug-matches-{source}.json")
         with open(output_path, "w") as f:
             json.dump(result, f, indent=2)
@@ -1231,17 +1211,12 @@ def main_pipeline(sources_str, workdir):
     # Step 3: Merge candidates
     print(f"\n=== Merging candidates ===", file=sys.stderr)
     bugs_dir = os.path.join(workdir, "bugs")
-    merge_files = [os.path.join(bugs_dir, f"bug-candidates-{s}.json") for s in sources]
-    merge_files = [f for f in merge_files if os.path.isfile(f)]
+    merge_files = [os.path.join(bugs_dir, f"bug-candidates-{s}.json")
+                   for s in active_sources]
 
     # Determine tag for merged file
-    release_sources = [s for s in sources if not s.startswith("rebase-")]
-    if len(release_sources) == 1:
-        tag = release_sources[0]
-    elif len(release_sources) > 1:
-        tag = "merged"
-    else:
-        tag = sources[0] if len(sources) == 1 else "merged"
+    release_sources = [s for s in active_sources if not s.startswith("rebase-")]
+    tag = release_sources[0] if release_sources else active_sources[0]
 
     merged_output = os.path.join(bugs_dir, f"bug-candidates-merged-{tag}.json")
     main_merge(merge_files, merged_output, workdir)
@@ -1389,4 +1364,8 @@ def main_merge(merge_files, output_file, workdir):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except jira_search.JiraSearchError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
