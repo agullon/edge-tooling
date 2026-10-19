@@ -268,11 +268,25 @@ function badgeClass(total, hasCritical) {
 }
 
 // === Shared helpers (used by filter + export) ===
-function matchIssue(iss, q) {
-    var fields = [iss.title||'', iss.root_cause||'', iss.failure_type||'', iss.severity||'', iss.next_steps||''];
-    (iss.affected_jobs||[]).forEach(function(j){fields.push(j.name||'');});
-    (iss.scenarios||[]).forEach(function(s){fields.push(s);});
+function matchIssueText(iss, q) {
+    var fields = [iss.title || '', iss.root_cause || ''];
+    (iss.causal_chain || []).forEach(function(link) {
+        if (link) fields.push(link.cause || '', link.evidence || '', link.quote || '');
+    });
     return fields.join(' ').toLowerCase().indexOf(q) !== -1;
+}
+function matchIssue(iss, q, day) {
+    return matchIssueText(iss, q) || (iss.affected_jobs || []).some(function(job) {
+        return (!day || (job.date || '').substring(0, 10) === day) &&
+            (job.name || '').toLowerCase().indexOf(q) !== -1;
+    });
+}
+function relatedIssues(job, issues) {
+    return issues.filter(function(issue) {
+        return (issue.affected_jobs || []).some(function(affected) {
+            return job.url || affected.url ? job.url === affected.url : job.job === affected.name;
+        });
+    });
 }
 function issueToRow(iss, source, release) {
     var dates = (iss.affected_jobs||[]).map(function(j){return j.date||'';}).filter(Boolean).sort();
@@ -488,6 +502,7 @@ function renderIssueTable(parent, issues, anchorPrefix, sourceLabel) {
         // Issue row
         var tr = h('tr', 'issue-row');
         tr.id = anchorId;
+        tr.reportIssue = issue;
         if (jobDates.length) tr.setAttribute('data-dates', jobDates.join(' '));
         var tdSev = h('td', 'col-sev', h('span', 'severity-badge ' + sevCss, sev));
         var tdFtype = h('td', 'col-ftype', h('span', 'ftype-badge ' + ftypeCss, ftypeLabel));
@@ -676,7 +691,7 @@ function renderPeriodics(parent) {
         renderReleaseSection(parent, ver, rd[ver], sd[ver], jim);
     });
     // Event handlers
-    todayCb.addEventListener('change', function() { filterToday(this.checked); });
+    todayCb.addEventListener('change', applyReportFilter);
     sbsCb.addEventListener('change', function() { toggleSideBySide(this.checked); });
 }
 
@@ -733,7 +748,7 @@ function renderReleaseSection(parent, version, rdata, status, jim) {
         var rateSpan = h('span', rateCss, passedS + '/' + totalS + ' passed (' + rateS + '%)');
         jobsSum.appendChild(rateSpan);
         jobsDet.appendChild(jobsSum);
-        var jTable = h('table', 'data-table');
+        var jTable = h('table', 'data-table jobs-table');
         jTable.setAttribute('data-default-sort', '2,asc');
         var thead = document.createElement('thead');
         var thRow = document.createElement('tr');
@@ -744,7 +759,9 @@ function renderReleaseSection(parent, version, rdata, status, jim) {
         var tbody = document.createElement('tbody');
         var sorted = status.slice().sort(function(a,b) { return (a.finished||'').toString().localeCompare((b.finished||'').toString()); });
         sorted.forEach(function(sj) {
-            var tr = document.createElement('tr');
+            var tr = h('tr', 'job-row');
+            tr.reportJob = sj;
+            tr.reportIssues = relatedIssues(sj, rdata.issues || []);
             var st = sj.status || 'unknown';
             var stBadge = h('span', 'severity-badge', '');
             if (st === 'success') { stBadge.className = 'severity-badge severity-low'; stBadge.style.background = '#d4edda'; stBadge.style.color = '#155724'; stBadge.textContent = 'PASS'; }
@@ -1039,32 +1056,20 @@ document.querySelectorAll('.tab-btn').forEach(function(btn) {
         document.querySelectorAll('.tab-btn').forEach(function(el) { el.classList.remove('active'); });
         document.getElementById('tab-' + name).classList.add('active');
         this.classList.add('active');
+        applyReportFilter();
     });
 });
 
-// === Today filter ===
-function filterToday(on) {
-    var today = new Date().toISOString().split('T')[0];
-    document.querySelectorAll('#tab-periodics .issue-row').forEach(function(row) {
-        var dates = (row.getAttribute('data-dates') || '').split(' ');
-        var show = !on || dates.indexOf(today) !== -1;
-        row.style.display = show ? '' : 'none';
-        var detail = row.nextElementSibling;
-        if (detail && detail.classList.contains('detail-row')) {
-            if (!show) detail.classList.remove('show');
-            detail.style.display = show ? '' : 'none';
-        }
-    });
-    document.querySelectorAll('#tab-periodics .detail-row li[data-date]').forEach(function(li) {
-        li.style.display = (!on || li.getAttribute('data-date') === today) ? '' : 'none';
-    });
+// === Filtered periodic summaries ===
+function updatePeriodicSummaries() {
     document.querySelectorAll('#tab-periodics .release-section').forEach(function(sec) {
         var id = sec.id.replace('release-', '');
         var rows = sec.querySelectorAll('.issue-row');
-        var total = 0, bd = {build: 0, test: 0, infra: 0};
+        var total = 0, hasCritical = false, bd = {build: 0, test: 0, infra: 0};
         rows.forEach(function(r) {
             if (r.style.display !== 'none') {
                 total++;
+                if ((r.reportIssue.severity || '').toUpperCase() === 'CRITICAL') hasCritical = true;
                 var ft = r.querySelector('.col-ftype .ftype-badge');
                 if (ft) { var t = ft.textContent.trim().toLowerCase(); if (t==='build') bd.build++; else if (t==='infra') bd.infra++; else bd.test++; }
             }
@@ -1074,7 +1079,7 @@ function filterToday(on) {
         var tocEl = document.querySelector('.toc-counts[data-release="' + id + '"]');
         if (tocEl) tocEl.textContent = summary;
         var badge = sec.querySelector('.release-badge');
-        if (badge) { badge.textContent = total + ' ' + lbl; badge.className = 'badge release-badge ' + (total===0?'badge-ok':total>=5?'badge-critical':'badge-issues'); }
+        if (badge) { badge.textContent = total + ' ' + lbl; badge.className = 'badge release-badge ' + badgeClass(total, hasCritical); }
         var bdb = sec.querySelector('.bd-build'), bdt = sec.querySelector('.bd-test'), bdi = sec.querySelector('.bd-infra');
         if (bdb) bdb.textContent = bd.build;
         if (bdt) bdt.textContent = bd.test;
@@ -1196,6 +1201,7 @@ document.querySelectorAll('.data-table').forEach(function(table) {
             document.querySelectorAll('.tab-btn').forEach(function(el) {
                 if (el.getAttribute('data-tab') === tabId) el.classList.add('active');
             });
+            applyReportFilter();
         }
         requestAnimationFrame(function() { target.scrollIntoView({behavior: 'smooth'}); });
     }
@@ -1203,60 +1209,63 @@ document.querySelectorAll('.data-table').forEach(function(table) {
     window.addEventListener('hashchange', openAnchor);
 })();
 
-// === Text filter ===
-(function() {
+// === Text and Today-only filters ===
+function applyReportFilter() {
     var input = document.getElementById('report-filter');
     var countEl = document.getElementById('filter-count');
     if (!input || !countEl) return;
-    var debounceTimer;
-    function applyFilter() {
-        var q = input.value.trim().toLowerCase();
-        var shown = 0, total = 0;
-        document.querySelectorAll('#tab-periodics .issue-row').forEach(function(row) {
-            total++;
-            if (!q) { row.style.display = ''; shown++; return; }
-            var id = row.id || '';
-            var parts = id.match(/^release-(.+)-(\\d+)$/);
-            if (!parts) { row.style.display = ''; shown++; return; }
-            var ver = parts[1], num = parseInt(parts[2], 10);
-            var rd = (D.releases_data || {})[ver];
-            if (!rd || !rd.issues) { row.style.display = ''; shown++; return; }
-            var iss = rd.issues.find(function(i) { return i.number === num; });
-            var vis = iss ? matchIssue(iss, q) : true;
-            row.style.display = vis ? '' : 'none';
-            if (vis) shown++;
-            var detail = row.nextElementSibling;
-            if (detail && detail.classList.contains('detail-row')) {
-                if (!vis) { detail.classList.remove('show'); detail.style.display = 'none'; }
-                else { detail.style.display = ''; }
-            }
+    var query = input.value.trim().toLowerCase();
+    var todayToggle = document.getElementById('filter-today');
+    var day = todayToggle && todayToggle.checked ? new Date().toISOString().substring(0, 10) : null;
+    document.querySelectorAll('.issue-row').forEach(function(row) {
+        var issue = row.reportIssue;
+        var issueDay = row.closest('#tab-periodics') ? day : null;
+        row.reportEligible = !issueDay || (issue.affected_jobs || []).some(function(job) {
+            return (job.date || '').substring(0, 10) === issueDay;
         });
-        document.querySelectorAll('#tab-pull-requests .issue-row').forEach(function(row) {
-            total++;
-            if (!q) { row.style.display = ''; shown++; return; }
-            var id = row.id || '';
-            var parts = id.match(/^pr-(\\d+)-(\\d+)$/);
-            if (!parts) { row.style.display = ''; shown++; return; }
-            var prNum = parseInt(parts[1], 10), issNum = parseInt(parts[2], 10);
-            var pr = D.pr_data && D.pr_data.prs ? D.pr_data.prs.find(function(p){return p.number===prNum;}) : null;
-            var iss = pr && pr.issues ? pr.issues.find(function(i){return i.number===issNum;}) : null;
-            var vis = iss ? matchIssue(iss, q) : true;
-            row.style.display = vis ? '' : 'none';
-            if (vis) shown++;
-            var detail = row.nextElementSibling;
-            if (detail && detail.classList.contains('detail-row')) {
-                if (!vis) { detail.classList.remove('show'); detail.style.display = 'none'; }
-                else { detail.style.display = ''; }
-            }
-        });
-        document.querySelectorAll('#tab-bugs .data-table tbody tr').forEach(function(row) {
-            total++; if (!q) { row.style.display = ''; shown++; return; }
-            var vis = row.textContent.toLowerCase().indexOf(q) !== -1;
-            row.style.display = vis ? '' : 'none'; if (vis) shown++;
-        });
-        countEl.textContent = q ? (shown + ' / ' + total + ' matches') : '';
+        var visible = row.reportEligible && matchIssue(issue, query, issueDay);
+        row.style.display = visible ? '' : 'none';
+        var detail = row.nextElementSibling;
+        if (detail && detail.classList.contains('detail-row')) {
+            detail.style.display = visible ? '' : 'none';
+            if (!visible) detail.classList.remove('show');
+        }
+    });
+    document.querySelectorAll('#tab-periodics .job-row').forEach(function(row) {
+        var job = row.reportJob;
+        var finished = String(job.finished || '');
+        var finishedDate = /^\\d+$/.test(finished) ? fmtEpoch(finished) : finished;
+        row.reportEligible = !day || finishedDate.substring(0, 10) === day;
+        var matches = (job.job || '').toLowerCase().indexOf(query) !== -1 ||
+            row.reportIssues.some(function(issue) { return matchIssueText(issue, query); });
+        row.style.display = row.reportEligible && matches ? '' : 'none';
+    });
+    document.querySelectorAll('#tab-periodics .detail-row li[data-date]').forEach(function(item) {
+        item.style.display = !day || item.getAttribute('data-date') === day ? '' : 'none';
+    });
+    updatePeriodicSummaries();
+    var active = document.querySelector('.tab-content.active');
+    countEl.textContent = '';
+    if (!active || ['tab-periodics', 'tab-pull-requests'].indexOf(active.id) === -1) return;
+    function counter(selector, label) {
+        var rows = Array.from(active.querySelectorAll(selector)).filter(function(row) { return row.reportEligible; });
+        var matched = rows.filter(function(row) { return row.style.display !== 'none'; }).length;
+        return label + ': ' + matched + '/' + rows.length;
     }
-    input.addEventListener('input', function() { clearTimeout(debounceTimer); debounceTimer = setTimeout(applyFilter, 300); });
+    var counts = [];
+    if (active.querySelector('.jobs-table')) counts.push(counter('.job-row', 'Jobs'));
+    counts.push(counter('.issue-row', 'Failures'));
+    countEl.textContent = counts.join(', ');
+}
+(function() {
+    var input = document.getElementById('report-filter');
+    if (!input) return;
+    var debounceTimer;
+    input.addEventListener('input', function() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(applyReportFilter, 300);
+    });
+    applyReportFilter();
 })();
 
 // === JSON / CSV export ===
@@ -1902,7 +1911,7 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
         <button class="tab-btn" data-tab="images">Image Health</button>
     </div>
     <div class="filter-bar">
-        <input type="text" id="report-filter" placeholder="Filter issues\\u2026 (title, root cause, job name, severity)">
+        <input type="text" id="report-filter" placeholder="Filter… (title, root cause, causal chain, job name)">
         <span class="filter-count" id="filter-count"></span>
         <span class="export-bar">
             <button class="export-btn" id="export-json" title="Download report data as JSON">Export JSON</button>
