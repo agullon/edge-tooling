@@ -141,7 +141,11 @@ const context = vm.createContext({
     alert() {alerts++;}
 });
 let alerts = 0;
-vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), context);
+const renderer = fs.readFileSync(process.argv[2], 'utf8');
+const rendererEnd = renderer.lastIndexOf('})();');
+const testExports = 'window.reportTest = {data: D, renderOverview, renderPeriodics, applyReportFilter};\n';
+vm.runInContext(renderer.slice(0, rendererEnd) + testExports + renderer.slice(rendererEnd), context);
+const reportTest = context.window.reportTest;
 const input = document.getElementById('report-filter');
 const counts = () => document.getElementById('filter-count').textContent;
 const visible = selector => document.querySelectorAll(selector).filter(row => row.style.display !== 'none');
@@ -233,4 +237,112 @@ location.hash = '#pr-7-1';
 handlers.hashchange();
 assert.equal(counts(), 'Failures: 1/1');
 assert.equal(alerts, 6);
+function renderGroupFixture(releases, statuses = {}) {
+    query('');
+    document.getElementById('button-periodics').click();
+    reportTest.data.releases_data = releases;
+    reportTest.data.status_data = statuses;
+    const periodics = document.getElementById('tab-periodics');
+    periodics.textContent = '';
+    const overview = document.getElementById('overview-slot');
+    overview.textContent = '';
+    reportTest.renderOverview(overview);
+    reportTest.renderPeriodics(periodics);
+}
+function assertGroupSummary(version, groupCount, runCount, breakdown, suffix = '') {
+    const section = document.getElementById('release-' + version);
+    const expected = `${groupCount} failure group${groupCount === 1 ? '' : 's'} affecting ${runCount}${suffix ? ' identified' : ''} failed job run${runCount === 1 ? '' : 's'}${suffix}`;
+    assert.equal(section.querySelector('.release-badge').textContent, expected);
+    const heading = section.querySelector('.failure-analysis-summary');
+    assert.equal(Boolean(heading), Boolean(reportTest.data.releases_data[version].issues.length));
+    if (heading) assert.equal(heading.textContent, 'Failure Analysis — ' + expected);
+    const toc = document.querySelector(`.toc-counts[data-release="${version}"]`);
+    assert.equal(toc.textContent, `${expected} (${breakdown[0]} build groups, ${breakdown[1]} test groups, ${breakdown[2]} infrastructure groups)`);
+    assert.equal(section.querySelector('.bd-build').textContent, String(breakdown[0]));
+    assert.equal(section.querySelector('.bd-test').textContent, String(breakdown[1]));
+    assert.equal(section.querySelector('.bd-infra').textContent, String(breakdown[2]));
+    assert(section.querySelector('.breakdown').textContent.includes('failure groups'));
+    assert.equal(document.querySelector(`.overview-count[data-release="${version}"]`).textContent, String(groupCount));
+    assert.equal(document.querySelector(`.overview-summary[data-release="${version}"]`).textContent, expected);
+}
+const sameName = (run, date = today) => affected('same-job-name', run, date);
+const sharedRun = sameName('shared');
+const groupedIssues = [
+    issue(1, 'historical build', [sameName('old-run', oldDay)], {failure_type: 'build'}),
+    issue(2, 'shared primary', [sharedRun]),
+    issue(3, 'shared secondary', [{...sharedRun, name: 'same-job-name-alias'}]),
+    issue(4, 'independent run', [sameName('independent')]),
+    issue(5, 'shared tertiary', [sharedRun]),
+    issue(6, 'two run infrastructure', [sameName('new-run'), sameName('another-old-run', oldDay)], {failure_type: 'infrastructure'}),
+];
+const groupRelease = release(groupedIssues);
+const otherRelease = release([issue(1, 'different release', [sameName('different-release')])]);
+assert.equal(groupedIssues.reduce((total, entry) => total + entry.job_count, 0), 7);
+const groupStatuses = [...new Map(groupedIssues.flatMap(entry => entry.affected_jobs).map(job => [job.url, status(job)])).values()];
+renderGroupFixture({'5.0': groupRelease, 'other': otherRelease, 'empty': release([])}, {'5.0': groupStatuses, 'other': otherRelease.issues[0].affected_jobs.map(status), 'empty': []});
+assertGroupSummary('5.0', 6, 5, [1, 4, 1]);
+assertGroupSummary('other', 1, 1, [0, 1, 0]);
+assertGroupSummary('empty', 0, 0, [0, 0, 0]);
+assert(document.querySelector('#tab-periodics .toc').textContent.includes('0/0 passed (0%)'));
+reportTest.applyReportFilter();
+assertGroupSummary('5.0', 6, 5, [1, 4, 1]);
+query('shared');
+assertGroupSummary('5.0', 3, 1, [0, 3, 0]);
+assert.equal(counts(), `Jobs: 1/${groupStatuses.length + 1}, Failures: 3/${groupedIssues.length + 1}`);
+query('two run');
+assertGroupSummary('5.0', 1, 2, [0, 0, 1]);
+const groupToday = document.getElementById('filter-today');
+groupToday.checked = true;
+groupToday.dispatch('change');
+assertGroupSummary('5.0', 1, 1, [0, 0, 1]);
+query('');
+assertGroupSummary('5.0', 5, 3, [0, 4, 1]);
+document.getElementById('button-bugs').click();
+assert.equal(counts(), '');
+assertGroupSummary('5.0', 5, 3, [0, 4, 1]);
+document.getElementById('button-periodics').click();
+query('same-job-name');
+assertGroupSummary('5.0', 5, 3, [0, 4, 1]);
+assertGroupSummary('other', 1, 1, [0, 1, 0]);
+query('no-group-matches');
+assertGroupSummary('5.0', 0, 0, [0, 0, 0]);
+groupToday.checked = false;
+groupToday.dispatch('change');
+query('');
+assertGroupSummary('5.0', 6, 5, [1, 4, 1]);
+const unidentified = release([issue(1, 'unknown one', [{name: 'same-name'}]), issue(2, 'unknown two', [{name: 'same-name'}])]);
+renderGroupFixture({'unknown': unidentified});
+assertGroupSummary('unknown', 2, 0, [0, 2, 0], ' (+2 associations without run URLs)');
+query('unknown one');
+assertGroupSummary('unknown', 1, 0, [0, 1, 0], ' (+1 associations without run URLs)');
+const mixed = release([issue(1, 'mixed known', [sameName('known'), {name: 'missing old URL', date: oldDay}]), issue(2, 'mixed unknown', [{name: 'missing URL', date: today}])]);
+renderGroupFixture({'mixed': mixed});
+assertGroupSummary('mixed', 2, 1, [0, 2, 0], ' (+2 associations without run URLs)');
+const mixedToday = document.getElementById('filter-today');
+mixedToday.checked = true;
+mixedToday.dispatch('change');
+assertGroupSummary('mixed', 2, 1, [0, 2, 0], ' (+1 associations without run URLs)');
+query('mixed known');
+assertGroupSummary('mixed', 1, 1, [0, 1, 0]);
+renderGroupFixture({'no-jobs': release([issue(1, 'no references', [])])});
+assertGroupSummary('no-jobs', 1, 0, [0, 1, 0]);
+if (process.argv[3]) {
+    const supplied = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+    renderGroupFixture(supplied.releases_data, supplied.status_data);
+    Object.entries(supplied.releases_data).forEach(([version, releaseData]) => {
+        if (!releaseData || releaseData.collection_error) return;
+        const groups = releaseData.issues || [];
+        const jobs = groups.flatMap(entry => entry.affected_jobs || []);
+        const runs = new Set(jobs.filter(job => job.url).map(job => job.url));
+        const types = ['build', 'test', 'infrastructure'].map(type => groups.filter(entry =>
+            (['build', 'infrastructure'].includes(entry.failure_type) ? entry.failure_type : 'test') === type).length);
+        const unidentified = jobs.filter(job => !job.url).length;
+        const suffix = unidentified ? ` (+${unidentified} associations without run URLs)` : '';
+        assertGroupSummary(version, groups.length, runs.size, types, suffix);
+        reportTest.applyReportFilter();
+        assertGroupSummary(version, groups.length, runs.size, types, suffix);
+        console.log(`SUPPLIED release ${version}: ${groups.length} failure groups affecting ${runs.size} failed job runs; ${jobs.length} associations; producer total_failed=${releaseData.total_failed}`);
+    });
+}
+console.log('PASS failure group summaries: initial and dynamic 6 groups/5 distinct runs/7 associations, shared runs, multi-run groups, release scope, zero/empty, missing URLs and Today/search/tab reset');
 console.log('PASS renderer filter regressions: allowed fields, excluded fields, group/job relationships, empty reset, tabs, Today-only intersection, counters, exports and deep links');

@@ -288,6 +288,32 @@ function relatedIssues(job, issues) {
         });
     });
 }
+function failureGroupCounts(issues, day) {
+    var runs = new Set();
+    var counts = {groups: issues.length, runs: 0, unidentified: 0, build: 0, test: 0, infrastructure: 0, hasCritical: false};
+    issues.forEach(function(issue) {
+        var type = issue.failure_type;
+        counts[type === 'build' || type === 'infrastructure' ? type : 'test']++;
+        if ((issue.severity || '').toUpperCase() === 'CRITICAL') counts.hasCritical = true;
+        (issue.affected_jobs || []).forEach(function(job) {
+            if (day && (job.date || '').substring(0, 10) !== day) return;
+            if (job.url) runs.add(job.url);
+            else counts.unidentified++;
+        });
+    });
+    counts.runs = runs.size;
+    return counts;
+}
+function failureGroupSummary(counts) {
+    var groups = counts.groups + (counts.groups === 1 ? ' failure group' : ' failure groups');
+    var runs = counts.runs + (counts.unidentified ? ' identified' : '') +
+        (counts.runs === 1 ? ' failed job run' : ' failed job runs');
+    return groups + ' affecting ' + runs + (counts.unidentified ?
+        ' (+' + counts.unidentified + ' associations without run URLs)' : '');
+}
+function failureGroupBreakdown(counts) {
+    return counts.build + ' build groups, ' + counts.test + ' test groups, ' + counts.infrastructure + ' infrastructure groups';
+}
 function issueToRow(iss, source, release) {
     var dates = (iss.affected_jobs||[]).map(function(j){return j.date||'';}).filter(Boolean).sort();
     return {
@@ -612,20 +638,25 @@ function renderOverview(parent) {
         var sub = '';
         if (rdata && rdata.collection_error) { numDiv.textContent = '!'; numDiv.className = 'number status-fail'; }
         else if (rdata) {
-            var failed = rdata.total_failed;
+            var counts = failureGroupCounts(rdata.issues || []);
+            var failed = counts.groups;
+            numDiv.setAttribute('data-release', ver);
             numDiv.className = 'number ' + (failed > 0 ? 'status-fail' : 'status-pass');
+            numDiv.classList.add('overview-count');
+            numDiv.textContent = String(counts.groups);
             if (status) {
                 var total = status.length, passed = status.filter(function(j){return j.status==='success';}).length;
                 var rate = total > 0 ? Math.round(passed/total*100) : 0;
-                numDiv.textContent = String(failed);
-                var suffix = h('span', '', '/' + total);
-                suffix.style.cssText = 'font-size:0.5em;font-weight:400;color:#6c757d';
-                numDiv.appendChild(suffix);
                 sub = rate + '% pass rate';
-            } else { numDiv.textContent = String(failed); }
+            }
         } else { numDiv.textContent = '?'; }
         card.appendChild(numDiv);
         card.appendChild(h('div', 'label', 'Release ' + ver));
+        if (rdata && !rdata.collection_error) {
+            var groupInfo = h('div', 'overview-summary', failureGroupSummary(counts));
+            groupInfo.setAttribute('data-release', ver);
+            card.appendChild(groupInfo);
+        }
         if (sub) { var sd2 = document.createElement('div'); sd2.style.cssText = 'font-size:0.8em;color:#6c757d'; sd2.textContent = sub; card.appendChild(sd2); }
         parent.appendChild(card);
     });
@@ -671,16 +702,17 @@ function renderPeriodics(parent) {
         if (rdata && rdata.collection_error) {
             li.appendChild(document.createTextNode(' \\u2014 collection error'));
         } else if (rdata) {
-            var b = rdata.breakdown || {};
+            var counts = failureGroupCounts(rdata.issues || []);
             var passInfo = '';
             if (status) {
                 var total = status.length, passed = status.filter(function(j){return j.status==='success';}).length;
-                passInfo = ' \\u2014 ' + passed + '/' + total + ' passed (' + Math.round(passed/total*100) + '%)';
+                passInfo = ' \\u2014 ' + passed + '/' + total + ' passed (' + (total ? Math.round(passed/total*100) : 0) + '%)';
             }
-            var countsSpan = h('span', '', rdata.total_failed + ' failures (' + (b.build||0) + ' build, ' + (b.test||0) + ' test, ' + (b.infrastructure||0) + ' infra)' + passInfo);
+            var countsSpan = h('span', '', failureGroupSummary(counts) + ' (' + failureGroupBreakdown(counts) + ')');
             countsSpan.className = 'toc-counts';
             countsSpan.setAttribute('data-release', ver);
             li.appendChild(document.createTextNode(' \\u2014 ')); li.appendChild(countsSpan);
+            li.appendChild(document.createTextNode(passInfo));
         } else { li.appendChild(document.createTextNode(' \\u2014 no data')); }
         tocUl.appendChild(li);
     });
@@ -715,14 +747,12 @@ function renderReleaseSection(parent, version, rdata, status, jim) {
         pre.textContent = 'Data collection failed: ' + rdata.collection_error;
         sec.appendChild(pre); parent.appendChild(sec); return;
     }
-    var total = rdata.total_failed;
-    var hasCrit = (rdata.issues || []).some(function(i) { return (i.severity || '').toUpperCase() === 'CRITICAL'; });
-    var label = total === 1 ? 'failure' : 'failures';
+    var counts = failureGroupCounts(rdata.issues || []);
     var hdr3 = h('div', 'release-header');
     var heading = h('h2', '', ['Release ' + version]);
     heading.appendChild(sectionAnchor('release-' + version));
     hdr3.appendChild(heading);
-    var badge = h('span', 'badge ' + badgeClass(total, hasCrit) + ' release-badge', total + ' ' + label);
+    var badge = h('span', 'badge ' + badgeClass(counts.groups, counts.hasCritical) + ' release-badge', failureGroupSummary(counts));
     badge.setAttribute('data-release', version);
     hdr3.appendChild(badge);
     sec.appendChild(hdr3);
@@ -730,11 +760,11 @@ function renderReleaseSection(parent, version, rdata, status, jim) {
     var idxData = (D.index_data || {})[version];
     renderIndexImage(sec, idxData);
     // Breakdown
-    var b = rdata.breakdown || {};
+    var b = counts;
     var bd = h('div', 'breakdown');
-    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-build', String(b.build || 0)), ' Build']));
-    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-test', String(b.test || 0)), ' Test']));
-    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-infra', String(b.infrastructure || 0)), ' Infrastructure']));
+    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-build', String(b.build || 0)), ' Build failure groups']));
+    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-test', String(b.test || 0)), ' Test failure groups']));
+    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-infra', String(b.infrastructure || 0)), ' Infrastructure failure groups']));
     sec.appendChild(bd);
     var panels = h('div', 'section-panels');
     // All Jobs table
@@ -799,8 +829,7 @@ function renderReleaseSection(parent, version, rdata, status, jim) {
     // Failure analysis
     if (rdata.issues && rdata.issues.length) {
         var faDet = document.createElement('details'); faDet.className = 'section-toggle';
-        var faSum = document.createElement('summary');
-        faSum.textContent = 'Failure Analysis \\u2014 ' + total + ' ' + label;
+        var faSum = h('summary', 'failure-analysis-summary', 'Failure Analysis \\u2014 ' + failureGroupSummary(counts));
         faDet.appendChild(faSum);
         renderIssueTable(faDet, rdata.issues, 'release-' + version, 'Release ' + version);
         panels.appendChild(faDet);
@@ -1061,29 +1090,31 @@ document.querySelectorAll('.tab-btn').forEach(function(btn) {
 });
 
 // === Filtered periodic summaries ===
-function updatePeriodicSummaries() {
+function updatePeriodicSummaries(day) {
     document.querySelectorAll('#tab-periodics .release-section').forEach(function(sec) {
         var id = sec.id.replace('release-', '');
         var rows = sec.querySelectorAll('.issue-row');
-        var total = 0, hasCritical = false, bd = {build: 0, test: 0, infra: 0};
-        rows.forEach(function(r) {
-            if (r.style.display !== 'none') {
-                total++;
-                if ((r.reportIssue.severity || '').toUpperCase() === 'CRITICAL') hasCritical = true;
-                var ft = r.querySelector('.col-ftype .ftype-badge');
-                if (ft) { var t = ft.textContent.trim().toLowerCase(); if (t==='build') bd.build++; else if (t==='infra') bd.infra++; else bd.test++; }
-            }
-        });
-        var lbl = total === 1 ? 'failure' : 'failures';
-        var summary = total + ' ' + lbl + ' (' + bd.build + ' build, ' + bd.test + ' test, ' + bd.infra + ' infra)';
+        var issues = Array.from(rows).filter(function(row) { return row.style.display !== 'none'; })
+            .map(function(row) { return row.reportIssue; });
+        var counts = failureGroupCounts(issues, day);
+        var summary = failureGroupSummary(counts);
         var tocEl = document.querySelector('.toc-counts[data-release="' + id + '"]');
-        if (tocEl) tocEl.textContent = summary;
+        if (tocEl) tocEl.textContent = summary + ' (' + failureGroupBreakdown(counts) + ')';
         var badge = sec.querySelector('.release-badge');
-        if (badge) { badge.textContent = total + ' ' + lbl; badge.className = 'badge release-badge ' + badgeClass(total, hasCritical); }
+        if (badge) { badge.textContent = summary; badge.className = 'badge release-badge ' + badgeClass(counts.groups, counts.hasCritical); }
+        var analysis = sec.querySelector('.failure-analysis-summary');
+        if (analysis) analysis.textContent = 'Failure Analysis \\u2014 ' + summary;
+        var overview = document.querySelector('.overview-count[data-release="' + id + '"]');
+        if (overview) {
+            overview.textContent = String(counts.groups);
+            overview.className = 'number overview-count ' + (counts.groups ? 'status-fail' : 'status-pass');
+        }
+        var overviewSummary = document.querySelector('.overview-summary[data-release="' + id + '"]');
+        if (overviewSummary) overviewSummary.textContent = summary;
         var bdb = sec.querySelector('.bd-build'), bdt = sec.querySelector('.bd-test'), bdi = sec.querySelector('.bd-infra');
-        if (bdb) bdb.textContent = bd.build;
-        if (bdt) bdt.textContent = bd.test;
-        if (bdi) bdi.textContent = bd.infra;
+        if (bdb) bdb.textContent = counts.build;
+        if (bdt) bdt.textContent = counts.test;
+        if (bdi) bdi.textContent = counts.infrastructure;
     });
 }
 
@@ -1243,7 +1274,7 @@ function applyReportFilter() {
     document.querySelectorAll('#tab-periodics .detail-row li[data-date]').forEach(function(item) {
         item.style.display = !day || item.getAttribute('data-date') === day ? '' : 'none';
     });
-    updatePeriodicSummaries();
+    updatePeriodicSummaries(day);
     var active = document.querySelector('.tab-content.active');
     countEl.textContent = '';
     if (!active || ['tab-periodics', 'tab-pull-requests'].indexOf(active.id) === -1) return;
@@ -2169,7 +2200,8 @@ def main():
                 passed = sum(1 for j in status if j.get("status") == "success")
                 rate = round(passed / total * 100) if total > 0 else 0
                 extra = f" ({passed}/{total} passed, {rate}% pass rate)"
-            print(f"    Release {version}: {rdata['total_failed']} failed periodic jobs{extra}")
+            print(f"    Release {version}: {len(rdata.get('issues', []))} failure groups "
+                  f"({rdata['total_failed']} producer job/group associations){extra}")
         else:
             print(f"    Release {version}: no data")
     print("  Pull Requests:")
