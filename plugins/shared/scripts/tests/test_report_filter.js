@@ -59,7 +59,13 @@ class Element {
         this.children.push(child);
         return child;
     }
-    removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parent = null; }
+    removeChild(child) {
+        const index = this.children.indexOf(child);
+        if (index === -1) throw new Error('Cannot remove a non-child element');
+        this.children.splice(index, 1);
+        child.parent = null;
+        return child;
+    }
     setAttribute(name, value) { this.attributes[name] = String(value); }
     getAttribute(name) { return this.attributes[name] ?? this[name] ?? null; }
     hasAttribute(name) { return this.getAttribute(name) !== null; }
@@ -72,9 +78,60 @@ class Element {
     scrollIntoView() {}
     get cells() { return this.children; }
     get nextElementSibling() { return this.parent?.children[this.parent.children.indexOf(this) + 1] || null; }
-    set textContent(text) { this.text = String(text); this.children = []; }
+    set textContent(text) {
+        this.text = String(text);
+        this.children.forEach(child => { child.parent = null; });
+        this.children = [];
+    }
     get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
 }
+
+function testElementParentage() {
+    const parent = new Element('div');
+    const oldChild = new Element('span');
+    const oldSibling = new Element('span');
+    const descendant = new Element('b');
+    oldChild.appendChild(descendant);
+    parent.appendChild(oldChild);
+    parent.appendChild(oldSibling);
+    parent.textContent = 'replacement';
+    const newChild = new Element('i');
+    parent.appendChild(newChild);
+    const destination = new Element('div');
+    destination.appendChild(oldChild);
+    assert.deepEqual(parent.children, [newChild]);
+    assert.equal(parent.textContent, 'replacement');
+    assert.equal(newChild.parent, parent);
+    assert.equal(oldChild.parent, destination);
+    assert.equal(oldSibling.parent, null);
+    assert.deepEqual(destination.children, [oldChild]);
+    assert.equal(descendant.parent, oldChild);
+    assert.deepEqual(oldChild.children, [descendant]);
+    assert.equal(parent.appendChild(oldSibling), oldSibling);
+    assert.deepEqual(parent.children, [newChild, oldSibling]);
+    assert.equal(oldSibling.parent, parent);
+    assert.equal(destination.appendChild(newChild), newChild);
+    assert.deepEqual(parent.children, [oldSibling]);
+    assert.deepEqual(destination.children, [oldChild, newChild]);
+    assert.equal(newChild.parent, destination);
+    assert.equal(destination.appendChild(oldChild), oldChild);
+    assert.deepEqual(destination.children, [newChild, oldChild]);
+    assert.equal(oldChild.parent, destination);
+    assert.throws(() => parent.removeChild(newChild), /non-child/);
+    assert.deepEqual(parent.children, [oldSibling]);
+    assert.deepEqual(destination.children, [newChild, oldChild]);
+    assert.equal(newChild.parent, destination);
+    assert.throws(() => destination.removeChild(oldSibling), /non-child/);
+    assert.deepEqual(destination.children, [newChild, oldChild]);
+    assert.equal(oldSibling.parent, parent);
+    assert.equal(parent.removeChild(oldSibling), oldSibling);
+    assert.equal(oldSibling.parent, null);
+    assert.deepEqual(parent.children, []);
+    assert.throws(() => parent.removeChild(oldSibling), /non-child/);
+    assert.deepEqual(parent.children, []);
+    console.log('PASS Element parentage: text clearing detaches children, reuse preserves siblings, reparenting and non-child removal');
+}
+testElementParentage();
 
 const today = new Date().toISOString().substring(0, 10);
 const oldDay = '2020-01-01';
