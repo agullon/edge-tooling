@@ -85,7 +85,7 @@ If the script exits non-zero:
 | `rpm_mirror_rc` | RC only: RPMs available at `mirror.openshift.com/ocp/` |
 | `rpm_xy0_commit_match` | X.Y.0 only: commit matches the latest RC commit |
 
-### Bootc Checks (4.18+, not nightly)
+### Bootc Checks (4.19+, not nightly)
 
 | Check | Description |
 |---|---|
@@ -148,5 +148,5 @@ On failure, details appear below the failing check:
 - Read-only — does NOT create tickets, advisories, or modify external state. No confirmation required.
 - VPN is required for Brew queries and git commit verification on internal repos
 - GITLAB_API_TOKEN enables shipment MR checks; without it those checks show WARN
-- Bootc checks are skipped for versions below 4.18 and for nightly builds
+- Bootc checks are skipped for versions below 4.19 and for nightly builds
 - Exit code is non-zero if any check returns FAIL
