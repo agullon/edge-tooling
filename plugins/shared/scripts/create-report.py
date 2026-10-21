@@ -200,6 +200,7 @@ CSS = """\
         .filter-bar input[type="text"] { flex: 1; max-width: 360px; padding: 6px 12px; border: 1px solid #dee2e6; border-radius: 6px; font-size: 0.9em; outline: none; }
         .filter-bar input[type="text"]:focus { border-color: #e94560; box-shadow: 0 0 0 2px rgba(233,69,96,0.15); }
         .filter-bar .filter-count { font-size: 0.85em; color: #6c757d; white-space: nowrap; }
+        .filter-error { color: #b42318; font-size: 0.85em; }
         .export-bar { display: inline-flex; gap: 6px; margin-left: auto; }
         .export-btn { padding: 5px 12px; border: 1px solid #dee2e6; border-radius: 6px; background: #fff; font-size: 0.85em; cursor: pointer; color: #495057; font-weight: 600; }
         .export-btn:hover { background: #f8f9fa; border-color: #adb5bd; }
@@ -268,17 +269,30 @@ function badgeClass(total, hasCritical) {
 }
 
 // === Shared helpers (used by filter + export) ===
-function matchIssueText(iss, q) {
+var appliedFilter = {query: '', regex: false, matches: null};
+var pendingRegex = null;
+var rejectedRegex = null;
+function issueSearchFields(iss) {
     var fields = [iss.title || '', iss.root_cause || ''];
     (iss.causal_chain || []).forEach(function(link) {
         if (link) fields.push(link.cause || '', link.evidence || '', link.quote || '');
     });
-    return fields.join(' ').toLowerCase().indexOf(q) !== -1;
+    return fields.map(String);
+}
+function matchSearch(text, query) {
+    if (!query) return true;
+    return appliedFilter.regex ? appliedFilter.matches.has(text) :
+        text.toLowerCase().indexOf(query.toLowerCase()) !== -1;
+}
+function matchIssueText(iss, q) {
+    var fields = issueSearchFields(iss);
+    return appliedFilter.regex ? fields.some(function(field) { return matchSearch(field, q); }) :
+        matchSearch(fields.join(' '), q);
 }
 function matchIssue(iss, q, day) {
     return matchIssueText(iss, q) || (iss.affected_jobs || []).some(function(job) {
         return (!day || (job.date || '').substring(0, 10) === day) &&
-            (job.name || '').toLowerCase().indexOf(q) !== -1;
+            matchSearch(job.name || '', q);
     });
 }
 function relatedIssues(job, issues) {
@@ -340,7 +354,7 @@ function periodicTocStatus(version, query, day) {
         var finished = String(job.finished || '');
         var date = /^\\d+$/.test(finished) ? fmtEpoch(finished) : finished;
         return (!day || date.substring(0, 10) === day) &&
-            ((job.job || '').toLowerCase().indexOf(query) !== -1 ||
+            (matchSearch(job.job || '', query) ||
             relatedIssues(job, issues).some(function(issue) { return matchIssueText(issue, query); }));
     });
     return {total: jobs.length, passed: jobs.filter(function(job) { return job.status === 'success'; }).length,
@@ -1130,8 +1144,7 @@ function updatePeriodicSummaries(day) {
         var counts = failureGroupCounts(issues, day);
         var summary = failureGroupSummary(counts);
         var tocEl = document.querySelector('.toc-counts[data-release="' + id + '"]');
-        var input = document.getElementById('report-filter');
-        var stats = periodicTocStatus(id, input.value.trim().toLowerCase(), day);
+        var stats = periodicTocStatus(id, appliedFilter.query, day);
         if (tocEl) tocEl.textContent = tocAnalysisSummary((D.releases_data || {})[id], counts, stats);
         var statusEl = document.querySelector('.toc-status[data-release="' + id + '"]');
         if (statusEl) statusEl.textContent = ' \\u2014 ' + tocStatusSummary(stats);
@@ -1286,11 +1299,91 @@ document.querySelectorAll('.data-table').forEach(function(table) {
 })();
 
 // === Text and Today-only filters ===
+function regexWorker() {
+    self.onmessage = function(event) {
+        try {
+            var pattern = new RegExp(event.data.pattern, 'i');
+            var matches = event.data.texts.filter(function(text) { return pattern.test(text); });
+            self.postMessage({matches: matches});
+        } catch (error) {
+            self.postMessage({error: 'Invalid regular expression: ' + error.message});
+        }
+    };
+}
+function regexTexts() {
+    var texts = new Set();
+    function addIssue(issue) {
+        issueSearchFields(issue).forEach(function(text) { texts.add(text); });
+        (issue.affected_jobs || []).forEach(function(job) { texts.add(job.name || ''); });
+    }
+    Object.keys(D.releases_data || {}).forEach(function(version) {
+        ((D.releases_data[version] || {}).issues || []).forEach(addIssue);
+    });
+    (((D.pr_data || {}).prs) || []).forEach(function(pr) { (pr.issues || []).forEach(addIssue); });
+    document.querySelectorAll('.issue-row').forEach(function(row) { addIssue(row.reportIssue); });
+    Object.keys(D.status_data || {}).forEach(function(version) {
+        (D.status_data[version] || []).forEach(function(job) { texts.add(job.job || ''); });
+    });
+    return Array.from(texts);
+}
+function filterError(message) {
+    document.getElementById('report-filter').setAttribute('aria-invalid', message ? 'true' : 'false');
+    document.getElementById('report-filter-error').textContent = message;
+}
+function cancelRegex() {
+    if (!pendingRegex) return;
+    var request = pendingRegex;
+    pendingRegex = null;
+    clearTimeout(request.timer);
+    if (request.worker) request.worker.terminate();
+    if (request.url) URL.revokeObjectURL(request.url);
+}
 function applyReportFilter() {
+    var input = document.getElementById('report-filter');
+    if (!input) return;
+    var query = input.value.trim();
+    var mode = document.getElementById('filter-regex').checked && Boolean(query);
+    if (!mode) {
+        cancelRegex(); rejectedRegex = null;
+        appliedFilter = {query: query, regex: false, matches: null};
+        filterError('');
+    } else if (appliedFilter.regex && appliedFilter.query === query) {
+        cancelRegex(); rejectedRegex = null; filterError('');
+    } else if ((!pendingRegex || pendingRegex.query !== query) && rejectedRegex !== query) {
+        cancelRegex(); rejectedRegex = null; filterError('');
+        var request = {query: query};
+        pendingRegex = request;
+        function fail(message) {
+            if (pendingRegex !== request) return;
+            cancelRegex(); rejectedRegex = query;
+            filterError(message + ' Previous filter retained.');
+            renderAppliedFilter();
+        }
+        try {
+            if (query.length > 4096) throw new Error('Regular expression is too long (maximum 4096 characters).');
+            if (typeof Worker === 'undefined') throw new Error('Regex mode requires Web Worker support.');
+            request.url = URL.createObjectURL(new Blob(['(' + regexWorker.toString() + ')()'], {type: 'text/javascript'}));
+            request.worker = new Worker(request.url);
+            request.timer = setTimeout(function() { fail('Regular expression timed out.'); }, 1000);
+            request.worker.onmessage = function(event) {
+                if (pendingRegex !== request) return;
+                if (event.data.error) { fail(event.data.error); return; }
+                var matches = new Set(event.data.matches);
+                cancelRegex(); rejectedRegex = null;
+                appliedFilter = {query: query, regex: true, matches: matches};
+                filterError(''); renderAppliedFilter();
+            };
+            request.worker.onerror = function() { fail('Regex worker could not run.'); };
+            request.worker.postMessage({pattern: query, texts: regexTexts()});
+        } catch (error) { fail(error.message); }
+    }
+    renderAppliedFilter();
+}
+function renderAppliedFilter() {
     var input = document.getElementById('report-filter');
     var countEl = document.getElementById('filter-count');
     if (!input || !countEl) return;
-    var query = input.value.trim().toLowerCase();
+    var query = appliedFilter.query;
     var todayToggle = document.getElementById('filter-today');
     var day = todayToggle && todayToggle.checked ? new Date().toISOString().substring(0, 10) : null;
     document.querySelectorAll('.issue-row').forEach(function(row) {
@@ -1312,7 +1405,7 @@ function applyReportFilter() {
         var finished = String(job.finished || '');
         var finishedDate = /^\\d+$/.test(finished) ? fmtEpoch(finished) : finished;
         row.reportEligible = !day || finishedDate.substring(0, 10) === day;
-        var matches = (job.job || '').toLowerCase().indexOf(query) !== -1 ||
+        var matches = matchSearch(job.job || '', query) ||
             row.reportIssues.some(function(issue) { return matchIssueText(issue, query); });
         row.style.display = row.reportEligible && matches ? '' : 'none';
     });
@@ -1339,9 +1432,11 @@ function applyReportFilter() {
     if (!input) return;
     var debounceTimer;
     input.addEventListener('input', function() {
+        cancelRegex();
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(applyReportFilter, 300);
     });
+    document.getElementById('filter-regex').addEventListener('change', applyReportFilter);
     applyReportFilter();
 })();
 
@@ -1358,8 +1453,7 @@ function applyReportFilter() {
     }
     function collectIssues() {
         var rows = [];
-        var q = (document.getElementById('report-filter') || {}).value || '';
-        q = q.trim().toLowerCase();
+        var q = appliedFilter.query;
         var rd = D.releases_data || {};
         for (var ver in rd) {
             if (!rd[ver] || !rd[ver].issues) continue;
@@ -1380,8 +1474,8 @@ function applyReportFilter() {
         return rows;
     }
     document.getElementById('export-json').addEventListener('click', function() {
-        var q = ((document.getElementById('report-filter') || {}).value || '').trim();
-        var data = q ? {filter: q, issues: collectIssues(), exported: new Date().toISOString()} : D;
+        var q = appliedFilter.query;
+        var data = q ? {filter: q, filter_mode: appliedFilter.regex ? 'regex' : 'literal', issues: collectIssues(), exported: new Date().toISOString()} : D;
         var json = JSON.stringify(data, null, 2);
         var name = (D.component_title || 'report').toLowerCase().replace(/\\s+/g, '-') + '-' + (D.date || 'export') + '.json';
         download(json, name, 'application/json');
@@ -1988,7 +2082,9 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
         <button class="tab-btn" data-tab="images">Image Health</button>
     </div>
     <div class="filter-bar">
-        <input type="text" id="report-filter" placeholder="Filter… (title, root cause, causal chain, job name)">
+        <input type="text" id="report-filter" placeholder="Filter… (title, root cause, causal chain, job name)" aria-describedby="report-filter-error" aria-invalid="false">
+        <label class="filter-toggle"><input type="checkbox" id="filter-regex"> Regex mode</label>
+        <span id="report-filter-error" class="filter-error" role="alert" aria-live="polite"></span>
         <span class="filter-count" id="filter-count"></span>
         <span class="export-bar">
             <button class="export-btn" id="export-json" title="Download report data as JSON">Export JSON</button>

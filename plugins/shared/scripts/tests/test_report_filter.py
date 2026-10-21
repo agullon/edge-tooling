@@ -30,6 +30,9 @@ class ReportFilterTests(unittest.TestCase):
         )
         self.assertIn('placeholder="Filter… (title, root cause, causal chain, job name)"', html)
         self.assertNotIn(r"\u2026", html)
+        self.assertIn('id="filter-regex"> Regex mode', html)
+        self.assertIn('aria-describedby="report-filter-error" aria-invalid="false"', html)
+        self.assertIn('id="report-filter-error" class="filter-error" role="alert"', html)
         payload = html.split("window.REPORT_DATA = ", 1)[1].split(";</script>", 1)[0]
         data = json.loads(payload)
         self.assertEqual(data["releases_data"]["4.20"]["issues"][0]["causal_chain"], chain)
@@ -39,11 +42,12 @@ class ReportFilterTests(unittest.TestCase):
             renderer = Path(temporary) / "renderer.js"
             renderer.write_text(REPORT.JS)
             result = subprocess.run(
-                ["node", str(Path(__file__).with_name("test_report_filter.js")), str(renderer)],
+                ["node", str(Path(__file__).with_name("test_report_filter.js")), str(renderer), "", "--regex-tests"],
                 capture_output=True, text=True, check=False,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS renderer filter regressions", result.stdout)
+        self.assertIn("PASS isolated regex regressions", result.stdout)
         print(result.stdout.strip())
 
 

@@ -165,6 +165,7 @@ const data = {
     pr_data: {has_content: true, prs: [{number: 7, title: 'PR', failed: 1, issues: [issue(1, 'add PR capability', [affected('pr-only-job', 'pr', oldDay)])]}]},
     bugs_tab_data: {linked: [{key: 'BUG_ONLY', summary: 'add hidden bug', status: 'New'}], unlinked: [], jira_query_available: false},
 };
+const originalFilterData = JSON.parse(JSON.stringify(data));
 const body = new Element('body');
 const document = {
     body, createElement: tag => new Element(tag),
@@ -182,7 +183,7 @@ function skeleton(tag, id, cls, parent = body) {
     return element;
 }
 const container = skeleton('div', 'container', 'container');
-['report-title', 'report-timestamp', 'diagnostics-slot', 'overview-slot', 'loading', 'filter-count', 'report-filter', 'export-json', 'export-csv'].forEach(id => skeleton('div', id, '', container));
+['report-title', 'report-timestamp', 'diagnostics-slot', 'overview-slot', 'loading', 'filter-count', 'report-filter', 'filter-regex', 'report-filter-error', 'export-json', 'export-csv'].forEach(id => skeleton('div', id, '', container));
 ['periodics', 'pull-requests', 'bugs', 'images'].forEach((tab, index) => {
     const button = skeleton('button', 'button-' + tab, 'tab-btn' + (index ? '' : ' active'), container);
     button.setAttribute('data-tab', tab);
@@ -200,7 +201,7 @@ const context = vm.createContext({
 let alerts = 0;
 const renderer = fs.readFileSync(process.argv[2], 'utf8');
 const rendererEnd = renderer.lastIndexOf('})();');
-const testExports = 'window.reportTest = {data: D, renderOverview, renderPeriodics, renderPRs, applyReportFilter};\n';
+const testExports = 'window.reportTest = {data: D, renderOverview, renderPeriodics, renderPRs, applyReportFilter, get appliedFilter() { return appliedFilter; }, get pendingRegex() { return pendingRegex; }};\n';
 vm.runInContext(renderer.slice(0, rendererEnd) + testExports + renderer.slice(rendererEnd), context);
 const reportTest = context.window.reportTest;
 const input = document.getElementById('report-filter');
@@ -505,3 +506,9 @@ if (process.argv[3]) {
 }
 console.log('PASS failure group summaries: initial and dynamic 6 groups/5 distinct runs/7 associations, shared runs, multi-run groups, release scope, zero/empty, missing URLs and Today/search/tab reset');
 console.log('PASS renderer filter regressions: allowed fields, excluded fields, group/job relationships, empty reset, tabs, Today-only intersection, counters, exports and deep links');
+if (process.argv[4] === '--regex-tests') {
+    require('./test_report_regex.js')({context, document, reportTest, query, counts, visible, visibleJobUrls,
+        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release}).catch(error => {
+        console.error(error); process.exitCode = 1;
+    });
+}
