@@ -308,7 +308,7 @@ function renderGroupFixture(releases, statuses = {}) {
 }
 function assertGroupSummary(version, groupCount, runCount, breakdown, suffix = '') {
     const section = document.getElementById('release-' + version);
-    const expected = `${groupCount} failure group${groupCount === 1 ? '' : 's'} affecting ${runCount}${suffix ? ' identified' : ''} failed job run${runCount === 1 ? '' : 's'}${suffix}`;
+    const expected = `${groupCount} failure group${groupCount === 1 ? '' : 's'} in ${runCount}${suffix ? ' identified' : ''} job${runCount === 1 ? '' : 's'}${suffix}`;
     assert.equal(section.querySelector('.release-badge').textContent, expected);
     const heading = section.querySelector('.failure-analysis-summary');
     assert.equal(Boolean(heading), Boolean(reportTest.data.releases_data[version].issues.length));
@@ -340,14 +340,19 @@ renderGroupFixture({'5.0': groupRelease, 'other': otherRelease, 'empty': release
 assertGroupSummary('5.0', 6, 5, [1, 4, 1]);
 assertGroupSummary('other', 1, 1, [0, 1, 0]);
 assertGroupSummary('empty', 0, 0, [0, 0, 0]);
+assert.equal(document.getElementById('release-5.0').querySelector('.release-badge').textContent, '6 failure groups in 5 jobs');
+assert.equal(document.getElementById('release-other').querySelector('.release-badge').textContent, '1 failure group in 1 job');
+assert.equal(document.getElementById('release-empty').querySelector('.release-badge').textContent, '0 failure groups in 0 jobs');
 assert(document.querySelector('#tab-periodics .toc').textContent.includes('0/0 passed (0%)'));
 reportTest.applyReportFilter();
 assertGroupSummary('5.0', 6, 5, [1, 4, 1]);
 query('shared');
 assertGroupSummary('5.0', 3, 1, [0, 3, 0]);
+assert.equal(document.getElementById('release-5.0').querySelector('.release-badge').textContent, '3 failure groups in 1 job');
 assert.equal(counts(), `Jobs: 1/${groupStatuses.length + 1}, Failures: 3/${groupedIssues.length + 1}`);
 query('two run');
 assertGroupSummary('5.0', 1, 2, [0, 0, 1]);
+assert.equal(document.getElementById('release-5.0').querySelector('.release-badge').textContent, '1 failure group in 2 jobs');
 const groupToday = document.getElementById('filter-today');
 groupToday.checked = true;
 groupToday.dispatch('change');
@@ -398,7 +403,7 @@ if (process.argv[3]) {
         assertGroupSummary(version, groups.length, runs.size, types, suffix);
         reportTest.applyReportFilter();
         assertGroupSummary(version, groups.length, runs.size, types, suffix);
-        console.log(`SUPPLIED release ${version}: ${groups.length} failure groups affecting ${runs.size} failed job runs; ${jobs.length} associations; producer total_failed=${releaseData.total_failed}`);
+        console.log(`SUPPLIED release ${version}: ${document.getElementById('release-' + version).querySelector('.release-badge').textContent}; ${jobs.length} associations; producer total_failed=${releaseData.total_failed}`);
     });
 }
 console.log('PASS failure group summaries: initial and dynamic 6 groups/5 distinct runs/7 associations, shared runs, multi-run groups, release scope, zero/empty, missing URLs and Today/search/tab reset');

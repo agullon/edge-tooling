@@ -307,8 +307,8 @@ function failureGroupCounts(issues, day) {
 function failureGroupSummary(counts) {
     var groups = counts.groups + (counts.groups === 1 ? ' failure group' : ' failure groups');
     var runs = counts.runs + (counts.unidentified ? ' identified' : '') +
-        (counts.runs === 1 ? ' failed job run' : ' failed job runs');
-    return groups + ' affecting ' + runs + (counts.unidentified ?
+        (counts.runs === 1 ? ' job' : ' jobs');
+    return groups + ' in ' + runs + (counts.unidentified ?
         ' (+' + counts.unidentified + ' associations without run URLs)' : '');
 }
 function failureGroupBreakdown(counts) {
