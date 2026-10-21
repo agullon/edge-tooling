@@ -25,7 +25,23 @@ Automate MicroShift Release Testing Activities — from pre-release evaluation t
 
 ### Request ART to create a new Z-Stream
 
-For every Z-Stream marked as `ASK ART` in Pre-Check (Phase 0) output:
+For every Z-Stream marked as `ASK ART` in Pre-Check (Phase 0) output.
+
+This is automated by `scripts/request_art_builds.sh`, which creates (or reuses
+a matching existing) ART and USHIFT ticket, links them, and posts the Slack
+request for you:
+
+```shell
+scripts/request_art_builds.sh <X.Y.Z> <ART_DUE_DATE> <RELEASE_DATE> --reason "<TEXT>"
+```
+
+Use the ART and USHIFT ticket keys printed by the run — don't clone the
+templates below on top of them. See
+[Requirements](#requirements)
+for required secrets, and run with `--dry-run` first to preview the result
+without writing to Jira or Slack. Use `--help` for the full flag list.
+
+To do this manually instead:
 
  1. Clone this [template ART Jira ticket](https://redhat.atlassian.net/browse/ART-11857) and replace the target version in the title
  1. Share it in Slack [#forum-ocp-art](https://redhat.enterprise.slack.com/archives/CB95J6R4N) channel, template message example:
@@ -39,7 +55,9 @@ cc @Pablo Acevedo @Rama kasturi @AlejandroGullon @Tami Love
 
 For every Z-Stream release requested to ART:
 
- 1. Clone this [template USHIFT Jira ticket](https://redhat.atlassian.net/browse/USHIFT-6945) and replace the target version and date in the title
+ 1. Open the USHIFT ticket created by `request_art_builds.sh` (or clone the
+    [template USHIFT Jira ticket](https://redhat.atlassian.net/browse/USHIFT-6945)
+    and replace the target version and date in the title if tracking manually)
  1. Go through the steps described in the template ticket, log results, and mark each completed step.
 
 ## Requirements
