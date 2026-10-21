@@ -2,22 +2,6 @@
 
 Automate MicroShift Release Testing Activities — from pre-release evaluation through build validation, CI verification, advisory promotion, and post-release checks.
 
-## Outgoing Build-Request Notifications
-
-`scripts/request_art_builds.sh` reads the entire incoming-webhook URL from
-`SLACK_WEBHOOK_URL`. Inject it at runtime through a protected CI secret or your
-shell's secure secret-injection mechanism. Never hardcode it, commit it in a
-`.env` file, put it in query parameters or request text, or print it in logs.
-The URL must use HTTPS without userinfo, query parameters, or fragments.
-
-The script disables shell tracing and keeps the webhook out of curl arguments.
-Do not enable tracing around secret injection: the script cannot undo anything
-the calling shell logged before launch. `--dry-run` and `--skip-slack` do not
-require the webhook; `--resend-slack` explicitly notifies for a reused ticket.
-`--skip-slack` prints a manual message, so keep its reason text free of secrets.
-If a webhook is exposed, rotate it through Slack and update the injected secret.
-The script neither provisions nor rotates webhooks.
-
 ## Installation
 
 ```text
