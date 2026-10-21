@@ -344,6 +344,23 @@ function tocStatusSummary(status) {
     if (status && status.pending) text += ' \\u2014 ' + status.pending + ' running';
     return text;
 }
+function confirmedPRZeroStatus(status) {
+    return status && ['passed', 'failed', 'pending', 'total'].every(function(field) {
+        return Number.isInteger(status[field]) && status[field] >= 0;
+    }) && status.failed === 0 && status.pending === 0 && status.passed === status.total;
+}
+function prAnalysisSummary(pr, counts) {
+    if ((pr.analysis && Array.isArray(pr.analysis.issues) && !pr.analysis.issues.length) ||
+        (!pr.analysis && confirmedPRZeroStatus(pr.status))) {
+        return '0 failures (0 build, 0 test, 0 infrastructure)';
+    }
+    return tocAnalysisSummary(pr.analysis, counts);
+}
+function prStatusSummary(pr) {
+    return confirmedPRZeroStatus(pr.status) && pr.status.total === 0 &&
+        (!pr.analysis || (Array.isArray(pr.analysis.issues) && !pr.analysis.issues.length)) ? '' :
+        ' \\u2014 All PR jobs: ' + tocStatusSummary(pr.status);
+}
 function periodicTocStatus(version, query, day) {
     var jobs = (D.status_data || {})[version];
     if (!Array.isArray(jobs)) return null;
@@ -918,10 +935,10 @@ function renderPRs(parent) {
         var li = document.createElement('li');
         li.appendChild(makeLink('#pr-' + pr.number, 'PR# ' + pr.number));
         var counts = failureGroupCounts((pr.analysis || {}).issues || []);
-        var info = h('span', 'toc-pr-counts', tocAnalysisSummary(pr.analysis, counts, pr.status));
+        var info = h('span', 'toc-pr-counts', prAnalysisSummary(pr, counts));
         info.reportPR = pr;
         li.appendChild(document.createTextNode(' \\u2014 ')); li.appendChild(info);
-        li.appendChild(h('span', 'toc-status', ' \\u2014 All PR jobs: ' + tocStatusSummary(pr.status)));
+        li.appendChild(h('span', 'toc-status', prStatusSummary(pr)));
         ul.appendChild(li);
     });
     toc.appendChild(ul); parent.appendChild(toc);
@@ -1170,7 +1187,7 @@ function updatePRSummaries() {
         var issues = Array.from(section.querySelectorAll('.issue-row')).filter(function(row) {
             return row.style.display !== 'none';
         }).map(function(row) { return row.reportIssue; });
-        toc.textContent = tocAnalysisSummary(pr.analysis, failureGroupCounts(issues), pr.status);
+        toc.textContent = prAnalysisSummary(pr, failureGroupCounts(issues));
     });
 }
 

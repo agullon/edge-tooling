@@ -429,10 +429,10 @@ renderGroupFixture({'main': release(tocIssues), 'unavailable': null, 'zero': nul
 reportTest.data.pr_data = {has_content: true, prs: [{number: 99, issues: tocIssues}, {number: 100, issues: []}, {number: 105, issues: groupedIssues}]};
 reportTest.data.pr_status = [
     {pr_number: 99, passed: 3, failed: 4, total: 7},
-    {pr_number: 100, passed: 1, failed: 0, total: 1},
+    {pr_number: 100, passed: 1, failed: 0, pending: 0, total: 1},
     {pr_number: 101, passed: 1, failed: 1, total: 2},
     {pr_number: 102, passed: 0, failed: 0, total: 0},
-    {pr_number: 103, passed: 1, failed: 0, total: 1},
+    {pr_number: 103, passed: 1, failed: 0, pending: 0, total: 1},
     {pr_number: 104, passed: 1, failed: 0, pending: 1, total: 2},
     {pr_number: 105, passed: 4, failed: 5, total: 9},
     {pr_number: 106, passed: 0, failed: 0, pending: 2, total: 2},
@@ -457,8 +457,8 @@ assert.equal(periodicTOC('zero'), 'Release zero — failure analysis unavailable
 assert.equal(prTOC(102), 'PR# 102 — failure analysis unavailable — All PR jobs: no job data');
 assert(periodicTOC('confirmed').includes('0 failures in 0 jobs (0 build, 0 test, 0 infrastructure) — no job data'));
 assert(periodicTOC('clean').includes('0 failures in 0 jobs (0 build, 0 test, 0 infrastructure) — 1/1 passed (100%)'));
-assert(prTOC(100).includes('0 failures in 0 jobs (0 build, 0 test, 0 infrastructure) — All PR jobs: 1/1 passed (100%)'));
-assert(prTOC(103).includes('0 failures in 0 jobs (0 build, 0 test, 0 infrastructure) — All PR jobs: 1/1 passed (100%)'));
+assert(prTOC(100).includes('0 failures (0 build, 0 test, 0 infrastructure) — All PR jobs: 1/1 passed (100%)'));
+assert(prTOC(103).includes('0 failures (0 build, 0 test, 0 infrastructure) — All PR jobs: 1/1 passed (100%)'));
 assert(periodicTOC('pending').includes('failure analysis unavailable — 0/1 passed (0%) — 1 running'));
 assert(prTOC(104).includes('failure analysis unavailable — All PR jobs: 1/2 passed (50%) — 1 running'));
 assert(prTOC(105).includes('6 failures in 5 jobs (1 build, 4 test, 1 infrastructure) — All PR jobs: 4/9 passed (44%)'));
@@ -494,6 +494,59 @@ await filterQuery('');
 assert.equal(periodicTOC('main'), 'Release main — ' + alignedSummary);
 assert.equal(prTOC(99), 'PR# 99 — ' + alignedPRSummary);
 console.log('PASS aligned TOCs: ' + alignedSummary + '; unavailable analysis, no job data, confirmed zero, pending, search/Today/tab/reset');
+const savedPRData = reportTest.data.pr_data;
+const savedPRStatus = reportTest.data.pr_status;
+const compactZero = '0 failures (0 build, 0 test, 0 infrastructure)';
+const collectedZeroPRs = [3873, 3823, 3813, 3802, 3730].map(pr_number =>
+    ({pr_number, passed: 0, failed: 0, pending: 0, total: 0}));
+reportTest.data.pr_data = null;
+reportTest.data.pr_status = collectedZeroPRs.concat([
+    {pr_number: 200},
+    {pr_number: 201, passed: 0, failed: 0, total: 0},
+    {pr_number: 202, passed: 0, failed: 1, pending: 0, total: 1},
+    {pr_number: 203, passed: 0, failed: 0, pending: 1, total: 1},
+    {pr_number: 204, passed: 1, failed: 0, pending: 0, total: 2},
+    {pr_number: 206, passed: 1, failed: 0, total: 1},
+    {pr_number: 207, passed: 1, failed: 1, pending: 0, total: 1},
+    {pr_number: 208, passed: '0', failed: 0, pending: 0, total: 0},
+    {pr_number: 209, passed: 0, failed: -1, pending: 0, total: 0},
+    {pr_number: 210, passed: 0, failed: 0, pending: 0.5, total: 0},
+]);
+prTab.textContent = ''; reportTest.renderPRs(prTab);
+function assertCollectedZeros() {
+    collectedZeroPRs.forEach(entry => assert.equal(prTOC(entry.pr_number), `PR# ${entry.pr_number} — ${compactZero}`));
+    for (const number of [200, 201, 202, 203, 204, 206, 207, 208, 209, 210]) {
+        assert(prTOC(number).includes('failure analysis unavailable'));
+    }
+    for (const number of [208, 209, 210]) assert(!prTOC(number).includes('passed ('));
+    assert(document.getElementById('pr-207').querySelector('.badge').textContent.includes('1 failure'));
+    assert(prTOC(203).includes('1 running'));
+}
+assertCollectedZeros();
+await filterQuery('no matches'); assertCollectedZeros();
+tocToday.checked = true; tocToday.dispatch('change'); assertCollectedZeros();
+document.getElementById('button-pull-requests').click(); assertCollectedZeros();
+await filterQuery(''); assertCollectedZeros();
+tocToday.checked = false; tocToday.dispatch('change');
+reportTest.data.pr_data = {prs: [{number: 205, issues: []}]};
+reportTest.data.pr_status = null;
+prTab.textContent = ''; reportTest.renderPRs(prTab);
+assert.equal(prTOC(205), `PR# 205 — ${compactZero} — All PR jobs: no job data`);
+reportTest.data.pr_status = [{pr_number: 205, passed: 0, failed: 0, pending: 0, total: 0}];
+prTab.textContent = ''; reportTest.renderPRs(prTab);
+assert.equal(prTOC(205), `PR# 205 — ${compactZero}`);
+reportTest.data.pr_data = null; reportTest.data.pr_status = null;
+prTab.textContent = ''; reportTest.renderPRs(prTab);
+assert(!prTab.textContent.includes(compactZero));
+reportTest.data.pr_error = 'collection failed';
+prTab.textContent = ''; reportTest.renderPRs(prTab);
+assert(prTab.textContent.includes('collection error'));
+assert(!prTab.textContent.includes(compactZero));
+reportTest.data.pr_error = null;
+reportTest.data.pr_data = savedPRData; reportTest.data.pr_status = savedPRStatus;
+prTab.textContent = ''; reportTest.renderPRs(prTab);
+document.getElementById('button-periodics').click();
+console.log('PASS PR zero summaries: supplied five explicit zero records, missing/partial status, pending, failed, analysis-empty, collection error and filter/Today/tab/reset');
 if (process.argv[3]) {
     const supplied = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
     renderGroupFixture(supplied.releases_data, supplied.status_data);
@@ -503,14 +556,16 @@ if (process.argv[3]) {
     reportTest.renderPRs(prTab);
     (supplied.pr_status || []).forEach(entry => {
         const text = prTOC(entry.pr_number);
-        assert(text.includes('All PR jobs: '));
         if (entry.total > 0) {
+            assert(text.includes('All PR jobs: '));
             assert(text.includes(`${entry.passed}/${entry.total} passed (${Math.round(entry.passed / entry.total * 100)}%)`));
         } else {
-            assert(text.includes('no job data'));
             assert(!text.includes('passed ('));
             const analysis = (supplied.pr_data?.prs || []).find(pr => pr.number === entry.pr_number);
-            if (!analysis) assert(text.includes('failure analysis unavailable'));
+            if ((!analysis || (Array.isArray(analysis.issues) && !analysis.issues.length)) &&
+                ['passed', 'failed', 'pending', 'total'].every(field => entry[field] === 0)) {
+                assert.equal(text, `PR# ${entry.pr_number} — ${compactZero}`);
+            } else assert(text.includes('no job data'));
         }
         console.log('SUPPLIED TOC ' + text);
     });
