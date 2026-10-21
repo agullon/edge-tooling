@@ -312,7 +312,39 @@ function failureGroupSummary(counts) {
         ' (+' + counts.unidentified + ' associations without run URLs)' : '');
 }
 function failureGroupBreakdown(counts) {
-    return counts.build + ' build groups, ' + counts.test + ' test groups, ' + counts.infrastructure + ' infrastructure groups';
+    return ['build', 'test', 'infrastructure'].map(function(type) {
+        return counts[type] + ' ' + type + ' group' + (counts[type] === 1 ? '' : 's');
+    }).join(', ');
+}
+function tocAnalysisSummary(analysis, counts, status) {
+    if (analysis && Array.isArray(analysis.issues)) {
+        return failureGroupSummary(counts) + ' (' + failureGroupBreakdown(counts) + ')';
+    }
+    if (status && status.total > 0 && status.passed === status.total) {
+        var empty = failureGroupCounts([]);
+        return failureGroupSummary(empty) + ' (' + failureGroupBreakdown(empty) + ')';
+    }
+    return 'failure analysis unavailable';
+}
+function tocStatusSummary(status) {
+    var text = !status || !status.total ? 'no job data' :
+        status.passed + '/' + status.total + ' passed (' + Math.round(status.passed / status.total * 100) + '%)';
+    if (status && status.pending) text += ' \\u2014 ' + status.pending + ' running';
+    return text;
+}
+function periodicTocStatus(version, query, day) {
+    var jobs = (D.status_data || {})[version];
+    if (!Array.isArray(jobs)) return null;
+    var issues = ((D.releases_data || {})[version] || {}).issues || [];
+    jobs = jobs.filter(function(job) {
+        var finished = String(job.finished || '');
+        var date = /^\\d+$/.test(finished) ? fmtEpoch(finished) : finished;
+        return (!day || date.substring(0, 10) === day) &&
+            ((job.job || '').toLowerCase().indexOf(query) !== -1 ||
+            relatedIssues(job, issues).some(function(issue) { return matchIssueText(issue, query); }));
+    });
+    return {total: jobs.length, passed: jobs.filter(function(job) { return job.status === 'success'; }).length,
+        pending: jobs.filter(function(job) { return ['pending', 'running', 'triggered'].indexOf(job.status) !== -1; }).length};
 }
 function issueToRow(iss, source, release) {
     var dates = (iss.affected_jobs||[]).map(function(j){return j.date||'';}).filter(Boolean).sort();
@@ -701,19 +733,17 @@ function renderPeriodics(parent) {
         li.appendChild(makeLink('#release-' + ver, 'Release ' + ver));
         if (rdata && rdata.collection_error) {
             li.appendChild(document.createTextNode(' \\u2014 collection error'));
-        } else if (rdata) {
-            var counts = failureGroupCounts(rdata.issues || []);
-            var passInfo = '';
-            if (status) {
-                var total = status.length, passed = status.filter(function(j){return j.status==='success';}).length;
-                passInfo = ' \\u2014 ' + passed + '/' + total + ' passed (' + (total ? Math.round(passed/total*100) : 0) + '%)';
-            }
-            var countsSpan = h('span', '', failureGroupSummary(counts) + ' (' + failureGroupBreakdown(counts) + ')');
+        } else {
+            var counts = failureGroupCounts((rdata || {}).issues || []);
+            var stats = periodicTocStatus(ver, '', null);
+            var countsSpan = h('span', '', tocAnalysisSummary(rdata, counts, stats));
             countsSpan.className = 'toc-counts';
             countsSpan.setAttribute('data-release', ver);
             li.appendChild(document.createTextNode(' \\u2014 ')); li.appendChild(countsSpan);
-            li.appendChild(document.createTextNode(passInfo));
-        } else { li.appendChild(document.createTextNode(' \\u2014 no data')); }
+            var statusSpan = h('span', 'toc-status', ' \\u2014 ' + tocStatusSummary(stats));
+            statusSpan.setAttribute('data-release', ver);
+            li.appendChild(statusSpan);
+        }
         tocUl.appendChild(li);
     });
     toc.appendChild(tocUl);
@@ -847,13 +877,13 @@ function renderPRs(parent) {
         sec.appendChild(pre); parent.appendChild(sec); return;
     }
     var analyzed = {};
-    if (D.pr_data && D.pr_data.has_content) {
+    if (D.pr_data) {
         (D.pr_data.prs || []).forEach(function(pr) { analyzed[pr.number] = pr; });
     }
     var allPrs = [];
     if (D.pr_status) {
         D.pr_status.forEach(function(s) {
-            var entry = {number: s.pr_number, title: s.title || '', url: s.url || '', passed: s.passed || 0, failed: s.failed || 0, pending: s.pending || 0, total: s.total || 0};
+            var entry = {number: s.pr_number, title: s.title || '', url: s.url || '', passed: s.passed || 0, failed: s.failed || 0, pending: s.pending || 0, total: s.total || 0, status: s};
             if (analyzed[s.pr_number]) entry.analysis = analyzed[s.pr_number];
             allPrs.push(entry);
         });
@@ -873,12 +903,13 @@ function renderPRs(parent) {
     toc.appendChild(h('h3', '', 'Table of Contents'));
     var ul = document.createElement('ul');
     allPrs.forEach(function(pr) {
-        var b = (pr.analysis && pr.analysis.breakdown) || {build:0,test:0,infrastructure:0};
         var li = document.createElement('li');
         li.appendChild(makeLink('#pr-' + pr.number, 'PR# ' + pr.number));
-        var info = ' \\u2014 ' + pr.failed + ' failures (' + (b.build||0) + ' build, ' + (b.test||0) + ' test, ' + (b.infrastructure||0) + ' infra)';
-        if (pr.pending) info += ' \\u2014 ' + pr.pending + ' running';
-        li.appendChild(document.createTextNode(info));
+        var counts = failureGroupCounts((pr.analysis || {}).issues || []);
+        var info = h('span', 'toc-pr-counts', tocAnalysisSummary(pr.analysis, counts, pr.status));
+        info.reportPR = pr;
+        li.appendChild(document.createTextNode(' \\u2014 ')); li.appendChild(info);
+        li.appendChild(h('span', 'toc-status', ' \\u2014 All PR jobs: ' + tocStatusSummary(pr.status)));
         ul.appendChild(li);
     });
     toc.appendChild(ul); parent.appendChild(toc);
@@ -1099,7 +1130,11 @@ function updatePeriodicSummaries(day) {
         var counts = failureGroupCounts(issues, day);
         var summary = failureGroupSummary(counts);
         var tocEl = document.querySelector('.toc-counts[data-release="' + id + '"]');
-        if (tocEl) tocEl.textContent = summary + ' (' + failureGroupBreakdown(counts) + ')';
+        var input = document.getElementById('report-filter');
+        var stats = periodicTocStatus(id, input.value.trim().toLowerCase(), day);
+        if (tocEl) tocEl.textContent = tocAnalysisSummary((D.releases_data || {})[id], counts, stats);
+        var statusEl = document.querySelector('.toc-status[data-release="' + id + '"]');
+        if (statusEl) statusEl.textContent = ' \\u2014 ' + tocStatusSummary(stats);
         var badge = sec.querySelector('.release-badge');
         if (badge) { badge.textContent = summary; badge.className = 'badge release-badge ' + badgeClass(counts.groups, counts.hasCritical); }
         var analysis = sec.querySelector('.failure-analysis-summary');
@@ -1115,6 +1150,16 @@ function updatePeriodicSummaries(day) {
         if (bdb) bdb.textContent = counts.build;
         if (bdt) bdt.textContent = counts.test;
         if (bdi) bdi.textContent = counts.infrastructure;
+    });
+}
+function updatePRSummaries() {
+    document.querySelectorAll('.toc-pr-counts').forEach(function(toc) {
+        var pr = toc.reportPR;
+        var section = document.getElementById('pr-' + pr.number);
+        var issues = Array.from(section.querySelectorAll('.issue-row')).filter(function(row) {
+            return row.style.display !== 'none';
+        }).map(function(row) { return row.reportIssue; });
+        toc.textContent = tocAnalysisSummary(pr.analysis, failureGroupCounts(issues), pr.status);
     });
 }
 
@@ -1275,6 +1320,7 @@ function applyReportFilter() {
         item.style.display = !day || item.getAttribute('data-date') === day ? '' : 'none';
     });
     updatePeriodicSummaries(day);
+    updatePRSummaries();
     var active = document.querySelector('.tab-content.active');
     countEl.textContent = '';
     if (!active || ['tab-periodics', 'tab-pull-requests'].indexOf(active.id) === -1) return;

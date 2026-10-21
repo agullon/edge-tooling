@@ -200,7 +200,7 @@ const context = vm.createContext({
 let alerts = 0;
 const renderer = fs.readFileSync(process.argv[2], 'utf8');
 const rendererEnd = renderer.lastIndexOf('})();');
-const testExports = 'window.reportTest = {data: D, renderOverview, renderPeriodics, applyReportFilter};\n';
+const testExports = 'window.reportTest = {data: D, renderOverview, renderPeriodics, renderPRs, applyReportFilter};\n';
 vm.runInContext(renderer.slice(0, rendererEnd) + testExports + renderer.slice(rendererEnd), context);
 const reportTest = context.window.reportTest;
 const input = document.getElementById('report-filter');
@@ -314,7 +314,9 @@ function assertGroupSummary(version, groupCount, runCount, breakdown, suffix = '
     assert.equal(Boolean(heading), Boolean(reportTest.data.releases_data[version].issues.length));
     if (heading) assert.equal(heading.textContent, 'Failure Analysis — ' + expected);
     const toc = document.querySelector(`.toc-counts[data-release="${version}"]`);
-    assert.equal(toc.textContent, `${expected} (${breakdown[0]} build groups, ${breakdown[1]} test groups, ${breakdown[2]} infrastructure groups)`);
+    const types = ['build', 'test', 'infrastructure'];
+    const categories = breakdown.map((count, index) => `${count} ${types[index]} group${count === 1 ? '' : 's'}`).join(', ');
+    assert.equal(toc.textContent, `${expected} (${categories})`);
     assert.equal(section.querySelector('.bd-build').textContent, String(breakdown[0]));
     assert.equal(section.querySelector('.bd-test').textContent, String(breakdown[1]));
     assert.equal(section.querySelector('.bd-infra').textContent, String(breakdown[2]));
@@ -343,7 +345,7 @@ assertGroupSummary('empty', 0, 0, [0, 0, 0]);
 assert.equal(document.getElementById('release-5.0').querySelector('.release-badge').textContent, '6 failure groups in 5 jobs');
 assert.equal(document.getElementById('release-other').querySelector('.release-badge').textContent, '1 failure group in 1 job');
 assert.equal(document.getElementById('release-empty').querySelector('.release-badge').textContent, '0 failure groups in 0 jobs');
-assert(document.querySelector('#tab-periodics .toc').textContent.includes('0/0 passed (0%)'));
+assert(document.querySelector('#tab-periodics .toc').textContent.includes('no job data'));
 reportTest.applyReportFilter();
 assertGroupSummary('5.0', 6, 5, [1, 4, 1]);
 query('shared');
@@ -388,9 +390,103 @@ query('mixed known');
 assertGroupSummary('mixed', 1, 1, [0, 1, 0]);
 renderGroupFixture({'no-jobs': release([issue(1, 'no references', [])])});
 assertGroupSummary('no-jobs', 1, 0, [0, 1, 0]);
+const tocJobs = [affected('build-job', 'toc-build', oldDay), affected('infra-one', 'toc-i1'), affected('infra-two', 'toc-i2'), affected('infra-three', 'toc-i3')];
+const tocIssues = [issue(1, 'build failure', [tocJobs[0]], {failure_type: 'build'}),
+    issue(2, 'infra shared', [tocJobs[1], tocJobs[2]], {failure_type: 'infrastructure'}),
+    issue(3, 'infra last', [tocJobs[3]], {failure_type: 'infrastructure'})];
+const tocStatuses = [...tocJobs.map(status), ...[1, 2, 3].map(number => ({...status(affected('passing-' + number, 'toc-pass-' + number)), status: 'success'}))];
+renderGroupFixture({'main': release(tocIssues), 'unavailable': null, 'zero': null, 'clean': null, 'confirmed': release([]), 'pending': null}, {
+    main: tocStatuses, unavailable: [tocStatuses[0], tocStatuses[4]], zero: [],
+    clean: [tocStatuses[4]], confirmed: [], pending: [{...tocStatuses[4], status: 'pending'}],
+});
+reportTest.data.pr_data = {has_content: true, prs: [{number: 99, issues: tocIssues}, {number: 100, issues: []}, {number: 105, issues: groupedIssues}]};
+reportTest.data.pr_status = [
+    {pr_number: 99, passed: 3, failed: 4, total: 7},
+    {pr_number: 100, passed: 1, failed: 0, total: 1},
+    {pr_number: 101, passed: 1, failed: 1, total: 2},
+    {pr_number: 102, passed: 0, failed: 0, total: 0},
+    {pr_number: 103, passed: 1, failed: 0, total: 1},
+    {pr_number: 104, passed: 1, failed: 0, pending: 1, total: 2},
+    {pr_number: 105, passed: 4, failed: 5, total: 9},
+    {pr_number: 106, passed: 0, failed: 0, pending: 2, total: 2},
+    {pr_number: 107, passed: 1, failed: 1, other: 1, total: 3},
+];
+const prTab = document.getElementById('tab-pull-requests');
+prTab.textContent = '';
+reportTest.renderPRs(prTab);
+function periodicTOC(version) {
+    return document.querySelector(`.toc-counts[data-release="${version}"]`).parent.textContent;
+}
+function prTOC(number) {
+    return document.querySelectorAll('.toc-pr-counts').find(entry => entry.reportPR.number === number).parent.textContent;
+}
+const alignedSummary = '3 failure groups in 4 jobs (1 build group, 0 test groups, 2 infrastructure groups) — 3/7 passed (43%)';
+const alignedPRSummary = alignedSummary.replace(' — ', ' — All PR jobs: ');
+assert.equal(periodicTOC('main'), 'Release main — ' + alignedSummary);
+assert.equal(prTOC(99), 'PR# 99 — ' + alignedPRSummary);
+assert.equal(periodicTOC('unavailable'), 'Release unavailable — failure analysis unavailable — 1/2 passed (50%)');
+assert.equal(prTOC(101), 'PR# 101 — failure analysis unavailable — All PR jobs: 1/2 passed (50%)');
+assert.equal(periodicTOC('zero'), 'Release zero — failure analysis unavailable — no job data');
+assert.equal(prTOC(102), 'PR# 102 — failure analysis unavailable — All PR jobs: no job data');
+assert(periodicTOC('confirmed').includes('0 failure groups in 0 jobs (0 build groups, 0 test groups, 0 infrastructure groups) — no job data'));
+assert(periodicTOC('clean').includes('0 failure groups in 0 jobs (0 build groups, 0 test groups, 0 infrastructure groups) — 1/1 passed (100%)'));
+assert(prTOC(100).includes('0 failure groups in 0 jobs (0 build groups, 0 test groups, 0 infrastructure groups) — All PR jobs: 1/1 passed (100%)'));
+assert(prTOC(103).includes('0 failure groups in 0 jobs (0 build groups, 0 test groups, 0 infrastructure groups) — All PR jobs: 1/1 passed (100%)'));
+assert(periodicTOC('pending').includes('failure analysis unavailable — 0/1 passed (0%) — 1 running'));
+assert(prTOC(104).includes('failure analysis unavailable — All PR jobs: 1/2 passed (50%) — 1 running'));
+assert(prTOC(105).includes('6 failure groups in 5 jobs (1 build group, 4 test groups, 1 infrastructure group) — All PR jobs: 4/9 passed (44%)'));
+assert.equal(prTOC(106), 'PR# 106 — failure analysis unavailable — All PR jobs: 0/2 passed (0%) — 2 running');
+assert.equal(prTOC(107), 'PR# 107 — failure analysis unavailable — All PR jobs: 1/3 passed (33%)');
+reportTest.applyReportFilter();
+assert.equal(periodicTOC('main'), 'Release main — ' + alignedSummary);
+assert.equal(prTOC(99), 'PR# 99 — ' + alignedPRSummary);
+query('build failure');
+assert(periodicTOC('main').includes('1 failure group in 1 job (1 build group, 0 test groups, 0 infrastructure groups) — 0/1 passed (0%)'));
+assert(prTOC(99).includes('1 failure group in 1 job (1 build group, 0 test groups, 0 infrastructure groups) — All PR jobs: 3/7 passed (43%)'));
+assert(prTOC(105).includes('0 failure groups in 0 jobs (0 build groups, 0 test groups, 0 infrastructure groups) — All PR jobs: 4/9 passed (44%)'));
+document.getElementById('button-pull-requests').click();
+assert.equal(counts(), 'Failures: 1/9');
+const tocToday = document.getElementById('filter-today');
+tocToday.checked = true;
+tocToday.dispatch('change');
+assert(periodicTOC('main').includes('0 failure groups in 0 jobs (0 build groups, 0 test groups, 0 infrastructure groups) — no job data'));
+assert(prTOC(99).includes('1 failure group in 1 job'));
+assert(prTOC(99).includes('All PR jobs: 3/7 passed (43%)'));
+query('');
+assert(periodicTOC('main').includes('2 failure groups in 3 jobs (0 build groups, 0 test groups, 2 infrastructure groups) — 3/6 passed (50%)'));
+assert.equal(prTOC(99), 'PR# 99 — ' + alignedPRSummary);
+document.getElementById('button-periodics').click();
+assert(periodicTOC('main').includes('3/6 passed (50%)'));
+tocToday.checked = false;
+tocToday.dispatch('change');
+assert.equal(periodicTOC('main'), 'Release main — ' + alignedSummary);
+query('no matches');
+assert(periodicTOC('main').includes('0 failure groups in 0 jobs'));
+assert(prTOC(99).includes('0 failure groups in 0 jobs'));
+query('');
+assert.equal(periodicTOC('main'), 'Release main — ' + alignedSummary);
+assert.equal(prTOC(99), 'PR# 99 — ' + alignedPRSummary);
+console.log('PASS aligned TOCs: ' + alignedSummary + '; unavailable analysis, no job data, confirmed zero, pending, search/Today/tab/reset');
 if (process.argv[3]) {
     const supplied = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
     renderGroupFixture(supplied.releases_data, supplied.status_data);
+    reportTest.data.pr_data = supplied.pr_data;
+    reportTest.data.pr_status = supplied.pr_status;
+    prTab.textContent = '';
+    reportTest.renderPRs(prTab);
+    (supplied.pr_status || []).forEach(entry => {
+        const text = prTOC(entry.pr_number);
+        assert(text.includes('All PR jobs: '));
+        if (entry.total > 0) {
+            assert(text.includes(`${entry.passed}/${entry.total} passed (${Math.round(entry.passed / entry.total * 100)}%)`));
+        } else {
+            assert(text.includes('no job data'));
+            assert(!text.includes('passed ('));
+            const analysis = (supplied.pr_data?.prs || []).find(pr => pr.number === entry.pr_number);
+            if (!analysis) assert(text.includes('failure analysis unavailable'));
+        }
+        console.log('SUPPLIED TOC ' + text);
+    });
     Object.entries(supplied.releases_data).forEach(([version, releaseData]) => {
         if (!releaseData || releaseData.collection_error) return;
         const groups = releaseData.issues || [];
@@ -404,6 +500,7 @@ if (process.argv[3]) {
         reportTest.applyReportFilter();
         assertGroupSummary(version, groups.length, runs.size, types, suffix);
         console.log(`SUPPLIED release ${version}: ${document.getElementById('release-' + version).querySelector('.release-badge').textContent}; ${jobs.length} associations; producer total_failed=${releaseData.total_failed}`);
+        console.log('SUPPLIED TOC ' + periodicTOC(version));
     });
 }
 console.log('PASS failure group summaries: initial and dynamic 6 groups/5 distinct runs/7 associations, shared runs, multi-run groups, release scope, zero/empty, missing URLs and Today/search/tab reset');
