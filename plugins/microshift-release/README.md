@@ -37,7 +37,7 @@ scripts/request_art_builds.sh <X.Y.Z> <ART_DUE_DATE> <RELEASE_DATE> --reason "<T
 
 Use the ART and USHIFT ticket keys printed by the run — don't clone the
 templates below on top of them. See
-[Outgoing Build-Request Notifications](#outgoing-build-request-notifications)
+[Requirements](#requirements)
 for required secrets, and run with `--dry-run` first to preview the result
 without writing to Jira or Slack. Use `--help` for the full flag list.
 
