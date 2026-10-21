@@ -2083,7 +2083,7 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
     </div>
     <div class="filter-bar">
         <input type="text" id="report-filter" placeholder="Filter… (title, root cause, causal chain, job name)" aria-describedby="report-filter-error" aria-invalid="false">
-        <label class="filter-toggle"><input type="checkbox" id="filter-regex"> Regex mode</label>
+        <label class="filter-toggle" title="Uncheck for literal matching"><input type="checkbox" id="filter-regex" checked> Regex mode</label>
         <span id="report-filter-error" class="filter-error" role="alert" aria-live="polite"></span>
         <span class="filter-count" id="filter-count"></span>
         <span class="export-bar">

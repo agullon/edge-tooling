@@ -3,7 +3,7 @@ const {Worker: ThreadWorker} = require('node:worker_threads');
 
 module.exports = async function runRegexTests(harness) {
     const {context, document, reportTest, query, counts, visible, visibleJobUrls,
-        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release} = harness;
+        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release, defaultRegex} = harness;
     const blobs = new Map();
     const workers = [];
     class IsolatedWorker {
@@ -65,6 +65,20 @@ module.exports = async function runRegexTests(harness) {
         prTab.textContent = ''; reportTest.renderPRs(prTab);
         query('');
         const baseline = counts();
+        mode.checked = defaultRegex;
+        query(''); assert(mode.checked); assert.equal(counts(), baseline);
+        await regex('[');
+        assert(invalid()); assert.equal(counts(), baseline);
+        await regex('^(ADD CAPABILITY|remove capability)$');
+        assert(!invalid()); assert.equal(reportTest.appliedFilter.regex, true);
+        assert.deepEqual(visible('#tab-periodics .issue-row').map(row => row.reportIssue.number), [1, 2]);
+        setMode(false);
+        assert.equal(visible('#tab-periodics .issue-row').length, 0);
+        setMode(true); await until(() => !reportTest.pendingRegex);
+        assert.equal(visible('#tab-periodics .issue-row').length, 2);
+        query(''); assert(mode.checked); assert.equal(counts(), baseline); assert(!invalid());
+        setMode(false);
+        query(''); assert.equal(mode.checked, false); assert.equal(counts(), baseline);
         query('LITERAL.JOB[0]');
         assert.deepEqual(visibleJobUrls(), [punctuation.affected_jobs[0].url]);
         query('[a+b].*');

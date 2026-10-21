@@ -184,6 +184,11 @@ function skeleton(tag, id, cls, parent = body) {
 }
 const container = skeleton('div', 'container', 'container');
 ['report-title', 'report-timestamp', 'diagnostics-slot', 'overview-slot', 'loading', 'filter-count', 'report-filter', 'filter-regex', 'report-filter-error', 'export-json', 'export-csv'].forEach(id => skeleton('div', id, '', container));
+const reportHTML = fs.readFileSync(process.argv[5], 'utf8');
+const regexControl = reportHTML.match(/<input\b[^>]*\bid="filter-regex"[^>]*>/)[0];
+const defaultRegex = /\schecked(?:\s|=|>)/.test(regexControl);
+document.getElementById('filter-regex').checked = defaultRegex;
+assert.equal(defaultRegex, true, 'actual generated HTML must enable Regex mode');
 ['periodics', 'pull-requests', 'bugs', 'images'].forEach((tab, index) => {
     const button = skeleton('button', 'button-' + tab, 'tab-btn' + (index ? '' : ' active'), container);
     button.setAttribute('data-tab', tab);
@@ -209,6 +214,10 @@ const counts = () => document.getElementById('filter-count').textContent;
 const visible = selector => document.querySelectorAll(selector).filter(row => row.style.display !== 'none');
 const query = text => {input.value = text; input.dispatch('input');};
 const visibleJobUrls = () => visible('#tab-periodics .job-row').map(row => row.reportJob.url).sort();
+assert.equal(document.getElementById('filter-regex').checked, true);
+assert.equal(reportTest.appliedFilter.query, '');
+document.getElementById('filter-regex').checked = false;
+document.getElementById('filter-regex').dispatch('change');
 const crossBadge = document.querySelector('.release-badge[data-release="4.21"]');
 assert(crossBadge.classList.contains('badge-critical'));
 const jobTotal = periodicJobs.length + 1;
@@ -509,7 +518,7 @@ console.log('PASS failure summaries: initial and dynamic 6 groups/5 distinct run
 console.log('PASS renderer filter regressions: allowed fields, excluded fields, group/job relationships, empty reset, tabs, Today-only intersection, counters, exports and deep links');
 if (process.argv[4] === '--regex-tests') {
     require('./test_report_regex.js')({context, document, reportTest, query, counts, visible, visibleJobUrls,
-        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release}).catch(error => {
+        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release, defaultRegex}).catch(error => {
         console.error(error); process.exitCode = 1;
     });
 }

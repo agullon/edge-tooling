@@ -30,7 +30,8 @@ class ReportFilterTests(unittest.TestCase):
         )
         self.assertIn('placeholder="Filter… (title, root cause, causal chain, job name)"', html)
         self.assertNotIn(r"\u2026", html)
-        self.assertIn('id="filter-regex"> Regex mode', html)
+        self.assertIn('id="filter-regex" checked> Regex mode', html)
+        self.assertIn('title="Uncheck for literal matching"', html)
         self.assertIn('aria-describedby="report-filter-error" aria-invalid="false"', html)
         self.assertIn('id="report-filter-error" class="filter-error" role="alert"', html)
         payload = html.split("window.REPORT_DATA = ", 1)[1].split(";</script>", 1)[0]
@@ -41,8 +42,12 @@ class ReportFilterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             renderer = Path(temporary) / "renderer.js"
             renderer.write_text(REPORT.JS)
+            html = Path(temporary) / "report.html"
+            html.write_text(REPORT.generate_html(
+                "Probe", {}, [], None, None, datetime(2026, 10, 19, tzinfo=timezone.utc),
+            ))
             result = subprocess.run(
-                ["node", str(Path(__file__).with_name("test_report_filter.js")), str(renderer), "", "--regex-tests"],
+                ["node", str(Path(__file__).with_name("test_report_filter.js")), str(renderer), "", "--regex-tests", str(html)],
                 capture_output=True, text=True, check=False,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
