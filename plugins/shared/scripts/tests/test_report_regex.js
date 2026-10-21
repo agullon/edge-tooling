@@ -3,7 +3,7 @@ const {Worker: ThreadWorker} = require('node:worker_threads');
 
 module.exports = async function runRegexTests(harness) {
     const {context, document, reportTest, query, counts, visible, visibleJobUrls,
-        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release, defaultRegex} = harness;
+        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release} = harness;
     const blobs = new Map();
     const workers = [];
     class IsolatedWorker {
@@ -47,13 +47,12 @@ module.exports = async function runRegexTests(harness) {
         }
     }
     const input = document.getElementById('report-filter');
-    const mode = document.getElementById('filter-regex');
+    assert.equal(document.getElementById('filter-regex'), null);
     const error = document.getElementById('report-filter-error');
-    const setMode = checked => { mode.checked = checked; mode.dispatch('change'); };
     const invalid = () => input.getAttribute('aria-invalid') === 'true';
     async function regex(pattern) { query(pattern); await until(() => !reportTest.pendingRegex); }
     try {
-        setMode(false); query('');
+        query('');
         const punctuation = issue(5, 'literal [a+b].* token', [affected('literal.job[0]', 'punctuation')]);
         const pathological = issue(6, 'pathological', [affected('slow-job', 'slow')], {root_cause: 'a'.repeat(20000) + '!'});
         const originals = originalFilterData.releases_data['4.20'].issues;
@@ -65,29 +64,17 @@ module.exports = async function runRegexTests(harness) {
         prTab.textContent = ''; reportTest.renderPRs(prTab);
         query('');
         const baseline = counts();
-        mode.checked = defaultRegex;
-        query(''); assert(mode.checked); assert.equal(counts(), baseline);
         await regex('[');
         assert(invalid()); assert.equal(counts(), baseline);
         await regex('^(ADD CAPABILITY|remove capability)$');
-        assert(!invalid()); assert.equal(reportTest.appliedFilter.regex, true);
-        assert.deepEqual(visible('#tab-periodics .issue-row').map(row => row.reportIssue.number), [1, 2]);
-        setMode(false);
-        assert.equal(visible('#tab-periodics .issue-row').length, 0);
-        setMode(true); await until(() => !reportTest.pendingRegex);
-        assert.equal(visible('#tab-periodics .issue-row').length, 2);
-        query(''); assert(mode.checked); assert.equal(counts(), baseline); assert(!invalid());
-        setMode(false);
-        query(''); assert.equal(mode.checked, false); assert.equal(counts(), baseline);
-        query('LITERAL.JOB[0]');
-        assert.deepEqual(visibleJobUrls(), [punctuation.affected_jobs[0].url]);
-        query('[a+b].*');
-        assert.deepEqual(visibleJobUrls(), [punctuation.affected_jobs[0].url]);
-        assert.equal(reportTest.appliedFilter.regex, false);
-        query('add'); setMode(true); await until(() => !reportTest.pendingRegex);
-        await regex('^(ADD CAPABILITY|remove capability)$');
+        assert(!invalid());
         assert.deepEqual(visible('#tab-periodics .issue-row').map(row => row.reportIssue.number), [1, 2]);
         assert.equal(workers.at(-1).result.compilations, 1);
+        query(''); assert.equal(counts(), baseline); assert(!invalid());
+        await regex('^LITERAL\\.JOB\\[0\\]$');
+        assert.deepEqual(visibleJobUrls(), [punctuation.affected_jobs[0].url]);
+        await regex('\\[a\\+b\\]\\.\\*');
+        assert.deepEqual(visibleJobUrls(), [punctuation.affected_jobs[0].url]);
         await regex('^(ROOTNEEDLE|chaincause|chainevidence|chainquote)$');
         assert.deepEqual(visible('#tab-periodics .issue-row').map(row => row.reportIssue.number), [1]);
         for (const pattern of ['^chaincause$', '^chainevidence$', '^chainquote$']) {
@@ -141,8 +128,6 @@ module.exports = async function runRegexTests(harness) {
         today.checked = false; today.dispatch('change');
         query(''); assert.equal(counts(), baseline); assert(!invalid());
         await regex('add|remove');
-        setMode(false); assert.equal(visible('#tab-periodics .issue-row').length, 0);
-        setMode(true); await until(() => !reportTest.pendingRegex);
         assert.equal(visible('#tab-periodics .issue-row').length, 2);
         query('^rootneedle$');
         const stale = workers.at(-1); stale.hold = true;
@@ -151,13 +136,6 @@ module.exports = async function runRegexTests(harness) {
         const current = counts(); stale.deliver(); assert.equal(counts(), current);
         assert.equal(reportTest.appliedFilter.query, '^remove capability$');
         query('^rootneedle$');
-        const modeStale = workers.at(-1); modeStale.hold = true;
-        await until(() => Boolean(modeStale.deliver));
-        setMode(false);
-        const literalCount = counts(); modeStale.deliver(); assert.equal(counts(), literalCount);
-        assert.equal(reportTest.appliedFilter.regex, false);
-        setMode(true); await until(() => !reportTest.pendingRegex);
-        query('^remove capability$');
         const resetStale = workers.at(-1); resetStale.hold = true;
         await until(() => Boolean(resetStale.deliver));
         query(''); resetStale.deliver(); assert.equal(counts(), baseline); assert(!invalid());
@@ -182,8 +160,8 @@ module.exports = async function runRegexTests(harness) {
         await regex('^rootneedle$'); assert(!invalid());
         assert(workers.every(worker => worker.terminated)); assert.equal(blobs.size, 0);
         assert(workers.every(worker => worker.payload.texts.every(text => !['SEVERITY_ONLY', 'BUG_ONLY', 'REMEDIATION_ONLY'].includes(text))));
-        query(''); setMode(false);
-        console.log('PASS isolated regex regressions: literal punctuation, field anchors/alternation/classes, allowed fields, invalid/recovery/export, Today/tabs/counters, reset/mode, real worker timeout/heartbeat, one compilation and stale-response rejection');
+        query('');
+        console.log('PASS isolated regex regressions: regex-only initial matching, escaped punctuation, field anchors/alternation/classes, allowed fields, invalid/recovery/export, Today/tabs/counters, reset, real worker timeout/heartbeat, one compilation and stale-response rejection');
     } finally {
         workers.forEach(worker => worker.terminate());
     }

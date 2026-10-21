@@ -1,6 +1,9 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const {Worker: ThreadWorker} = require('node:worker_threads');
+
+async function main() {
 
 function descendants(element) {
     return element.children.flatMap(child => [child, ...descendants(child)]);
@@ -183,12 +186,10 @@ function skeleton(tag, id, cls, parent = body) {
     return element;
 }
 const container = skeleton('div', 'container', 'container');
-['report-title', 'report-timestamp', 'diagnostics-slot', 'overview-slot', 'loading', 'filter-count', 'report-filter', 'filter-regex', 'report-filter-error', 'export-json', 'export-csv'].forEach(id => skeleton('div', id, '', container));
+['report-title', 'report-timestamp', 'diagnostics-slot', 'overview-slot', 'loading', 'filter-count', 'report-filter', 'report-filter-error', 'export-json', 'export-csv'].forEach(id => skeleton('div', id, '', container));
 const reportHTML = fs.readFileSync(process.argv[5], 'utf8');
-const regexControl = reportHTML.match(/<input\b[^>]*\bid="filter-regex"[^>]*>/)[0];
-const defaultRegex = /\schecked(?:\s|=|>)/.test(regexControl);
-document.getElementById('filter-regex').checked = defaultRegex;
-assert.equal(defaultRegex, true, 'actual generated HTML must enable Regex mode');
+assert(!reportHTML.includes('id="filter-regex"'));
+assert.equal(document.getElementById('filter-regex'), null);
 ['periodics', 'pull-requests', 'bugs', 'images'].forEach((tab, index) => {
     const button = skeleton('button', 'button-' + tab, 'tab-btn' + (index ? '' : ' active'), container);
     button.setAttribute('data-tab', tab);
@@ -199,8 +200,17 @@ const handlers = {};
 const location = {hash: '', href: 'https://example.invalid/report'};
 const context = vm.createContext({
     document, window: {REPORT_DATA: data, addEventListener: (event, callback) => {handlers[event] = callback;}},
-    location, navigator: {}, setTimeout: callback => {callback(); return 1;}, clearTimeout() {}, requestAnimationFrame: callback => callback(),
+    location, navigator: {}, setTimeout: (callback, delay) => delay === 1000 ? setTimeout(callback, delay) : (callback(), 1), clearTimeout, requestAnimationFrame: callback => callback(),
     Blob: class {constructor(parts) {this.content = parts.join('');}}, URL: {createObjectURL(blob) {downloads.push(blob); return 'blob:test';}, revokeObjectURL() {}},
+    Worker: class {
+        constructor() {
+            this.thread = new ThreadWorker("const {parentPort} = require('node:worker_threads'); global.self = {postMessage: data => parentPort.postMessage(data)}; parentPort.on('message', data => self.onmessage({data}));" + downloads.at(-1).content, {eval: true});
+            this.thread.on('message', data => this.onmessage?.({data}));
+            this.thread.on('error', error => this.onerror?.(error));
+        }
+        postMessage(data) { this.thread.postMessage(data); }
+        terminate() { this.thread.terminate(); }
+    },
     alert() {alerts++;}
 });
 let alerts = 0;
@@ -213,21 +223,27 @@ const input = document.getElementById('report-filter');
 const counts = () => document.getElementById('filter-count').textContent;
 const visible = selector => document.querySelectorAll(selector).filter(row => row.style.display !== 'none');
 const query = text => {input.value = text; input.dispatch('input');};
+async function filterQuery(text) {
+    query(text);
+    const deadline = Date.now() + 5000;
+    while (reportTest.pendingRegex) {
+        assert(Date.now() < deadline, 'filter did not settle');
+        await new Promise(resolve => setTimeout(resolve, 5));
+    }
+}
 const visibleJobUrls = () => visible('#tab-periodics .job-row').map(row => row.reportJob.url).sort();
-assert.equal(document.getElementById('filter-regex').checked, true);
+assert.equal(document.getElementById('filter-regex'), null);
 assert.equal(reportTest.appliedFilter.query, '');
-document.getElementById('filter-regex').checked = false;
-document.getElementById('filter-regex').dispatch('change');
 const crossBadge = document.querySelector('.release-badge[data-release="4.21"]');
 assert(crossBadge.classList.contains('badge-critical'));
 const jobTotal = periodicJobs.length + 1;
 const failureTotal = issues.length + 1;
 assert.equal(counts(), `Jobs: ${jobTotal}/${jobTotal}, Failures: ${failureTotal}/${failureTotal}`);
-query('add');
+await filterQuery('add');
 assert.equal(counts(), `Jobs: ${addIssue.affected_jobs.length}/${jobTotal}, Failures: 1/${failureTotal}`);
 assert.equal(visible('#tab-periodics .issue-row').length, 1);
 for (const forbidden of ['SEVERITY_ONLY', 'BUG_ONLY', 'bug-only description', 'REMEDIATION_ONLY', 'SCENARIO_ONLY', 'TYPE_ONLY']) {
-    query(forbidden);
+    await filterQuery(forbidden);
     assert.equal(counts(), `Jobs: 0/${jobTotal}, Failures: 0/${failureTotal}`, forbidden);
     document.getElementById('export-json').click();
     assert.equal(JSON.parse(downloads.at(-1).content).issues.length, 0, forbidden);
@@ -236,28 +252,28 @@ for (const forbidden of ['SEVERITY_ONLY', 'BUG_ONLY', 'bug-only description', 'R
     assert.equal(downloads.length, beforeCsv, forbidden);
 }
 for (const term of ['rootneedle', 'chaincause', 'chainevidence', 'chainquote', '  ROOTNEEDLE  ']) {
-    query(term);
+    await filterQuery(term);
     assert.equal(counts(), `Jobs: 2/${jobTotal}, Failures: 1/${failureTotal}`, term);
     assert.deepEqual(visibleJobUrls(), addIssue.affected_jobs.map(job => job.url).sort(), term);
 }
-query('rivalneedle');
+await filterQuery('rivalneedle');
 assert.deepEqual(visibleJobUrls(), [issues[3].affected_jobs[0].url]);
-query('crossneedle');
+await filterQuery('crossneedle');
 assert.deepEqual(visibleJobUrls(), [crossIssue.affected_jobs[0].url]);
 assert(crossBadge.classList.contains('badge-critical'));
-query('rootneedle');
+await filterQuery('rootneedle');
 assert(crossBadge.classList.contains('badge-ok'));
-query('other-job');
+await filterQuery('other-job');
 assert.equal(counts(), `Jobs: 1/${jobTotal}, Failures: 1/${failureTotal}`);
-query('legacy-job');
+await filterQuery('legacy-job');
 assert.equal(counts(), `Jobs: 1/${jobTotal}, Failures: 1/${failureTotal}`);
-query('repeated-job');
+await filterQuery('repeated-job');
 assert.equal(counts(), `Jobs: ${periodicJobs.filter(job => job.job === 'repeated-job').length + 1}/${jobTotal}, Failures: 3/${failureTotal}`);
-query('passing-job');
+await filterQuery('passing-job');
 assert.equal(counts(), `Jobs: 1/${jobTotal}, Failures: 0/${failureTotal}`);
-query('does-not-match');
+await filterQuery('does-not-match');
 assert.equal(visible('#tab-periodics .detail-row').length, 0);
-query('');
+await filterQuery('');
 assert.equal(visible('#tab-periodics .detail-row').length, failureTotal);
 assert.equal(counts(), `Jobs: ${jobTotal}/${jobTotal}, Failures: ${failureTotal}/${failureTotal}`);
 const todayToggle = document.getElementById('filter-today');
@@ -265,13 +281,13 @@ todayToggle.checked = true;
 todayToggle.dispatch('change');
 const dayJobs = periodicJobs.filter(job => new Date(/^\d+$/.test(job.finished) ? Number(job.finished) * 1000 : job.finished).toISOString().startsWith(today)).length + 1;
 const dayFailures = issues.filter(entry => entry.affected_jobs.some(job => job.date === today)).length + 1;
-query('add');
+await filterQuery('add');
 assert.equal(counts(), `Jobs: 1/${dayJobs}, Failures: 1/${dayFailures}`);
-query('legacy-job');
+await filterQuery('legacy-job');
 assert.equal(counts(), `Jobs: 0/${dayJobs}, Failures: 0/${dayFailures}`);
-query('rootneedle');
+await filterQuery('rootneedle');
 assert.equal(counts(), `Jobs: 1/${dayJobs}, Failures: 1/${dayFailures}`);
-query('add');
+await filterQuery('add');
 document.getElementById('button-pull-requests').click();
 assert.equal(counts(), 'Failures: 1/1');
 document.getElementById('button-bugs').click();
@@ -284,22 +300,22 @@ assert.equal(counts(), `Jobs: 1/${dayJobs}, Failures: 1/${dayFailures}`);
 todayToggle.checked = false;
 todayToggle.dispatch('change');
 assert.equal(counts(), `Jobs: 2/${jobTotal}, Failures: 1/${failureTotal}`);
-query('rootneedle');
+await filterQuery('rootneedle');
 todayToggle.checked = true;
 todayToggle.dispatch('change');
 assert.equal(counts(), `Jobs: 1/${dayJobs}, Failures: 1/${dayFailures}`);
-query('add');
+await filterQuery('add');
 document.getElementById('export-json').click();
 assert.equal(JSON.parse(downloads.at(-1).content).issues.length, 2);
 document.getElementById('export-csv').click();
 assert(downloads.at(-1).content.includes('add capability'));
 document.getElementById('button-images').click();
-query('legacy-job');
+await filterQuery('legacy-job');
 document.getElementById('export-json').click();
 assert.deepEqual(JSON.parse(downloads.at(-1).content).issues.map(entry => entry.title), [addIssue.title]);
 document.getElementById('export-csv').click();
 assert(downloads.at(-1).content.includes(addIssue.title));
-query('add');
+await filterQuery('add');
 location.hash = '#pr-7-1';
 handlers.hashchange();
 assert.equal(counts(), 'Failures: 1/1');
@@ -359,36 +375,36 @@ assert.equal(document.getElementById('release-empty').querySelector('.release-ba
 assert(document.querySelector('#tab-periodics .toc').textContent.includes('no job data'));
 reportTest.applyReportFilter();
 assertGroupSummary('5.0', 6, 5, [1, 4, 1]);
-query('shared');
+await filterQuery('shared');
 assertGroupSummary('5.0', 3, 1, [0, 3, 0]);
 assert.equal(document.getElementById('release-5.0').querySelector('.release-badge').textContent, '3 failures in 1 job');
 assert.equal(counts(), `Jobs: 1/${groupStatuses.length + 1}, Failures: 3/${groupedIssues.length + 1}`);
-query('two run');
+await filterQuery('two run');
 assertGroupSummary('5.0', 1, 2, [0, 0, 1]);
 assert.equal(document.getElementById('release-5.0').querySelector('.release-badge').textContent, '1 failure in 2 jobs');
 const groupToday = document.getElementById('filter-today');
 groupToday.checked = true;
 groupToday.dispatch('change');
 assertGroupSummary('5.0', 1, 1, [0, 0, 1]);
-query('');
+await filterQuery('');
 assertGroupSummary('5.0', 5, 3, [0, 4, 1]);
 document.getElementById('button-bugs').click();
 assert.equal(counts(), '');
 assertGroupSummary('5.0', 5, 3, [0, 4, 1]);
 document.getElementById('button-periodics').click();
-query('same-job-name');
+await filterQuery('same-job-name');
 assertGroupSummary('5.0', 5, 3, [0, 4, 1]);
 assertGroupSummary('other', 1, 1, [0, 1, 0]);
-query('no-group-matches');
+await filterQuery('no-group-matches');
 assertGroupSummary('5.0', 0, 0, [0, 0, 0]);
 groupToday.checked = false;
 groupToday.dispatch('change');
-query('');
+await filterQuery('');
 assertGroupSummary('5.0', 6, 5, [1, 4, 1]);
 const unidentified = release([issue(1, 'unknown one', [{name: 'same-name'}]), issue(2, 'unknown two', [{name: 'same-name'}])]);
 renderGroupFixture({'unknown': unidentified});
 assertGroupSummary('unknown', 2, 0, [0, 2, 0], ' (+2 associations without run URLs)');
-query('unknown one');
+await filterQuery('unknown one');
 assertGroupSummary('unknown', 1, 0, [0, 1, 0], ' (+1 associations without run URLs)');
 const mixed = release([issue(1, 'mixed known', [sameName('known'), {name: 'missing old URL', date: oldDay}]), issue(2, 'mixed unknown', [{name: 'missing URL', date: today}])]);
 renderGroupFixture({'mixed': mixed});
@@ -397,7 +413,7 @@ const mixedToday = document.getElementById('filter-today');
 mixedToday.checked = true;
 mixedToday.dispatch('change');
 assertGroupSummary('mixed', 2, 1, [0, 2, 0], ' (+1 associations without run URLs)');
-query('mixed known');
+await filterQuery('mixed known');
 assertGroupSummary('mixed', 1, 1, [0, 1, 0]);
 renderGroupFixture({'no-jobs': release([issue(1, 'no references', [])])});
 assertGroupSummary('no-jobs', 1, 0, [0, 1, 0]);
@@ -451,7 +467,7 @@ assert.equal(prTOC(107), 'PR# 107 — failure analysis unavailable — All PR jo
 reportTest.applyReportFilter();
 assert.equal(periodicTOC('main'), 'Release main — ' + alignedSummary);
 assert.equal(prTOC(99), 'PR# 99 — ' + alignedPRSummary);
-query('build failure');
+await filterQuery('build failure');
 assert(periodicTOC('main').includes('1 failure in 1 job (1 build, 0 test, 0 infrastructure) — 0/1 passed (0%)'));
 assert(prTOC(99).includes('1 failure in 1 job (1 build, 0 test, 0 infrastructure) — All PR jobs: 3/7 passed (43%)'));
 assert(prTOC(105).includes('0 failures in 0 jobs (0 build, 0 test, 0 infrastructure) — All PR jobs: 4/9 passed (44%)'));
@@ -463,7 +479,7 @@ tocToday.dispatch('change');
 assert(periodicTOC('main').includes('0 failures in 0 jobs (0 build, 0 test, 0 infrastructure) — no job data'));
 assert(prTOC(99).includes('1 failure in 1 job'));
 assert(prTOC(99).includes('All PR jobs: 3/7 passed (43%)'));
-query('');
+await filterQuery('');
 assert(periodicTOC('main').includes('2 failures in 3 jobs (0 build, 0 test, 2 infrastructure) — 3/6 passed (50%)'));
 assert.equal(prTOC(99), 'PR# 99 — ' + alignedPRSummary);
 document.getElementById('button-periodics').click();
@@ -471,10 +487,10 @@ assert(periodicTOC('main').includes('3/6 passed (50%)'));
 tocToday.checked = false;
 tocToday.dispatch('change');
 assert.equal(periodicTOC('main'), 'Release main — ' + alignedSummary);
-query('no matches');
+await filterQuery('no matches');
 assert(periodicTOC('main').includes('0 failures in 0 jobs'));
 assert(prTOC(99).includes('0 failures in 0 jobs'));
-query('');
+await filterQuery('');
 assert.equal(periodicTOC('main'), 'Release main — ' + alignedSummary);
 assert.equal(prTOC(99), 'PR# 99 — ' + alignedPRSummary);
 console.log('PASS aligned TOCs: ' + alignedSummary + '; unavailable analysis, no job data, confirmed zero, pending, search/Today/tab/reset');
@@ -517,8 +533,9 @@ if (process.argv[3]) {
 console.log('PASS failure summaries: initial and dynamic 6 groups/5 distinct runs/7 associations, shared runs, multi-run groups, release scope, zero/empty, missing URLs and Today/search/tab reset');
 console.log('PASS renderer filter regressions: allowed fields, excluded fields, group/job relationships, empty reset, tabs, Today-only intersection, counters, exports and deep links');
 if (process.argv[4] === '--regex-tests') {
-    require('./test_report_regex.js')({context, document, reportTest, query, counts, visible, visibleJobUrls,
-        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release, defaultRegex}).catch(error => {
-        console.error(error); process.exitCode = 1;
-    });
+    await require('./test_report_regex.js')({context, document, reportTest, query, counts, visible, visibleJobUrls,
+        renderGroupFixture, originalFilterData, downloads, issue, affected, status, release});
 }
+
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -269,7 +269,7 @@ function badgeClass(total, hasCritical) {
 }
 
 // === Shared helpers (used by filter + export) ===
-var appliedFilter = {query: '', regex: false, matches: null};
+var appliedFilter = {query: '', matches: null};
 var pendingRegex = null;
 var rejectedRegex = null;
 function issueSearchFields(iss) {
@@ -281,13 +281,11 @@ function issueSearchFields(iss) {
 }
 function matchSearch(text, query) {
     if (!query) return true;
-    return appliedFilter.regex ? appliedFilter.matches.has(text) :
-        text.toLowerCase().indexOf(query.toLowerCase()) !== -1;
+    return appliedFilter.matches.has(text);
 }
 function matchIssueText(iss, q) {
     var fields = issueSearchFields(iss);
-    return appliedFilter.regex ? fields.some(function(field) { return matchSearch(field, q); }) :
-        matchSearch(fields.join(' '), q);
+    return fields.some(function(field) { return matchSearch(field, q); });
 }
 function matchIssue(iss, q, day) {
     return matchIssueText(iss, q) || (iss.affected_jobs || []).some(function(job) {
@@ -1342,12 +1340,11 @@ function applyReportFilter() {
     var input = document.getElementById('report-filter');
     if (!input) return;
     var query = input.value.trim();
-    var mode = document.getElementById('filter-regex').checked && Boolean(query);
-    if (!mode) {
+    if (!query) {
         cancelRegex(); rejectedRegex = null;
-        appliedFilter = {query: query, regex: false, matches: null};
+        appliedFilter = {query: '', matches: null};
         filterError('');
-    } else if (appliedFilter.regex && appliedFilter.query === query) {
+    } else if (appliedFilter.query === query) {
         cancelRegex(); rejectedRegex = null; filterError('');
     } else if ((!pendingRegex || pendingRegex.query !== query) && rejectedRegex !== query) {
         cancelRegex(); rejectedRegex = null; filterError('');
@@ -1361,7 +1358,7 @@ function applyReportFilter() {
         }
         try {
             if (query.length > 4096) throw new Error('Regular expression is too long (maximum 4096 characters).');
-            if (typeof Worker === 'undefined') throw new Error('Regex mode requires Web Worker support.');
+            if (typeof Worker === 'undefined') throw new Error('Regex filtering requires Web Worker support.');
             request.url = URL.createObjectURL(new Blob(['(' + regexWorker.toString() + ')()'], {type: 'text/javascript'}));
             request.worker = new Worker(request.url);
             request.timer = setTimeout(function() { fail('Regular expression timed out.'); }, 1000);
@@ -1370,7 +1367,7 @@ function applyReportFilter() {
                 if (event.data.error) { fail(event.data.error); return; }
                 var matches = new Set(event.data.matches);
                 cancelRegex(); rejectedRegex = null;
-                appliedFilter = {query: query, regex: true, matches: matches};
+                appliedFilter = {query: query, matches: matches};
                 filterError(''); renderAppliedFilter();
             };
             request.worker.onerror = function() { fail('Regex worker could not run.'); };
@@ -1436,7 +1433,6 @@ function renderAppliedFilter() {
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(applyReportFilter, 300);
     });
-    document.getElementById('filter-regex').addEventListener('change', applyReportFilter);
     applyReportFilter();
 })();
 
@@ -1475,7 +1471,7 @@ function renderAppliedFilter() {
     }
     document.getElementById('export-json').addEventListener('click', function() {
         var q = appliedFilter.query;
-        var data = q ? {filter: q, filter_mode: appliedFilter.regex ? 'regex' : 'literal', issues: collectIssues(), exported: new Date().toISOString()} : D;
+        var data = q ? {filter: q, filter_mode: 'regex', issues: collectIssues(), exported: new Date().toISOString()} : D;
         var json = JSON.stringify(data, null, 2);
         var name = (D.component_title || 'report').toLowerCase().replace(/\\s+/g, '-') + '-' + (D.date || 'export') + '.json';
         download(json, name, 'application/json');
@@ -2082,8 +2078,7 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
         <button class="tab-btn" data-tab="images">Image Health</button>
     </div>
     <div class="filter-bar">
-        <input type="text" id="report-filter" placeholder="Filter… (title, root cause, causal chain, job name)" aria-describedby="report-filter-error" aria-invalid="false">
-        <label class="filter-toggle" title="Uncheck for literal matching"><input type="checkbox" id="filter-regex" checked> Regex mode</label>
+        <input type="text" id="report-filter" placeholder="Filter… (regex: title, root cause, causal chain, job name)" aria-describedby="report-filter-error" aria-invalid="false">
         <span id="report-filter-error" class="filter-error" role="alert" aria-live="polite"></span>
         <span class="filter-count" id="filter-count"></span>
         <span class="export-bar">
