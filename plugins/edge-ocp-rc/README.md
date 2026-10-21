@@ -213,7 +213,7 @@ Usage: scripts/status.sh [topology] [--run <name>] [--json] [--failed] [--logs] 
 | `[topology]` | `tnf`, `tna`, or `sno` (omit for all topologies) |
 | `--json` | Structured JSON output (for agentic consumption) |
 | `--failed` | Show only failed/aborted jobs |
-| `--logs` | Fetch failure reasons from Prow artifacts; for TNF LVMS, use the suite JUnit and the validator's unexpected-skip summary, with a Prow JUnit fallback |
+| `--logs` | Fetch failure reasons from Prow artifacts; for TNF LVMS, use the suite JUnit with a Prow JUnit fallback |
 | `--classify` | Classify failures using Sippy nightly pass rates (implies `--logs`) |
 | `--report` | Jira-ready markdown output (implies `--logs`) |
 | `--watch [N]` | Poll every N seconds (default 120) until all jobs complete |

@@ -20,23 +20,17 @@ case "$*" in
     *'/artifacts/e2e-baremetalds-tnf-lvms-mno-qe-integration-tests/lvms-tnf-mno-integration-test/artifacts/junit_results.xml')
         case "$TEST_STATUS_MODE" in
             failure) printf '%s\n' '<testsuite><testcase name="device selector"><failure message="capacity failed"/></testcase><testcase name="RapiDAST"><skipped/></testcase></testsuite>' ;;
-            expected-skip|unexpected-skip) printf '%s\n' '<testsuite><testcase name="RapiDAST"><skipped/></testcase><testcase name="ordinary skip"><skipped/></testcase></testsuite>' ;;
+            expected-skip|skipped-suite-operator-failure) printf '%s\n' '<testsuite><testcase name="RapiDAST"><skipped/></testcase><testcase name="ordinary skip"><skipped/></testcase></testsuite>' ;;
             passing-operator-failure|passing-operator-pass) printf '%s\n' '<testsuite><testcase name="device selector"/></testsuite>' ;;
             malformed-operator-failure|malformed-operator-pass) printf '%s\n' '<testsuite>' ;;
             missing-operator-failure) exit 22 ;;
         esac ;;
     *'/artifacts/junit_operator.xml')
         case "$TEST_STATUS_MODE" in
-            failure|unexpected-skip|*-operator-failure) printf '%s\n' '<testsuite><testcase name="operator - post-step container test"><failure message="post-step failed"/></testcase></testsuite>' ;;
+            failure|*-operator-failure) printf '%s\n' '<testsuite><testcase name="operator - post-step container test"><failure message="post-step failed"/></testcase></testsuite>' ;;
             *-operator-pass) printf '%s\n' '<testsuite><testcase name="post-step"/></testsuite>' ;;
             *) exit 22 ;;
         esac ;;
-    *'/artifacts/e2e-baremetalds-tnf-lvms-mno-qe-integration-tests/baremetalds-two-node-fencing-lvms-mno-validate-results/artifacts/skip-summary.txt')
-        if [[ "$TEST_STATUS_MODE" == unexpected-skip ]]; then
-            printf '%s\n' 'passed=39 failed=0 skipped=2' 'EXPECTED SKIP RapiDAST' 'UNEXPECTED SKIP ordinary skip'
-        else
-            exit 22
-        fi ;;
     *) exit 22 ;;
 esac
 EOF
@@ -58,6 +52,10 @@ check_reason() {
         echo "$mode reported '$reason', expected '$expected'" >&2
         exit 1
     fi
+    if grep -q '/skip-summary.txt' "$TEST_CURL_LOG"; then
+        echo "$mode fetched the removed validator artifact" >&2
+        exit 1
+    fi
     if [[ "$fallback" == yes ]]; then
         if ! grep -q '/artifacts/junit_operator.xml' "$TEST_CURL_LOG"; then
             echo "$mode did not fetch the operator fallback" >&2
@@ -72,7 +70,7 @@ check_reason() {
 
 check_reason failure 'device selector: capacity failed' no
 check_reason expected-skip 'unable to determine failure from JUnit; inspect Prow steps'
-check_reason unexpected-skip 'Unexpected skip: ordinary skip' no
+check_reason skipped-suite-operator-failure 'post-step: post-step failed'
 check_reason passing-operator-failure 'post-step: post-step failed'
 check_reason malformed-operator-failure 'post-step: post-step failed'
 check_reason missing-operator-failure 'post-step: post-step failed'

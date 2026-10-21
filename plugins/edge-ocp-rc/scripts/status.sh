@@ -232,19 +232,6 @@ fetch_failure_reason() {
         fi
     fi
 
-    # The lane's validator, rather than raw JUnit, decides which skips are
-    # unexpected. A failed setup can leave an ordinary skip in JUnit without
-    # that skip being the cause of the job failure.
-    if [[ "$is_lvms" == true && ( -z "$reason" || "$reason" == "unable to parse junit" ) ]]; then
-        local summary skip_reason
-        summary=$(curl -fsSL --max-time 15 \
-            "${lvms_artifacts}/baremetalds-two-node-fencing-lvms-mno-validate-results/artifacts/skip-summary.txt" 2>/dev/null) || true
-        skip_reason=$(printf '%s\n' "$summary" | sed -n 's/^UNEXPECTED SKIP /Unexpected skip: /p' | head -1)
-        if [[ -n "$skip_reason" ]]; then
-            reason="$skip_reason"
-        fi
-    fi
-
     # A passing or malformed suite can accompany a setup or post-step failure.
     if [[ -z "$reason" || "$reason" == "unable to parse junit" ]]; then
         local operator_xml operator_reason
