@@ -319,7 +319,7 @@ function failureGroupCounts(issues, day) {
     return counts;
 }
 function failureGroupSummary(counts) {
-    var groups = counts.groups + (counts.groups === 1 ? ' failure group' : ' failure groups');
+    var groups = counts.groups + (counts.groups === 1 ? ' failure' : ' failures');
     var runs = counts.runs + (counts.unidentified ? ' identified' : '') +
         (counts.runs === 1 ? ' job' : ' jobs');
     return groups + ' in ' + runs + (counts.unidentified ?
@@ -327,7 +327,7 @@ function failureGroupSummary(counts) {
 }
 function failureGroupBreakdown(counts) {
     return ['build', 'test', 'infrastructure'].map(function(type) {
-        return counts[type] + ' ' + type + ' group' + (counts[type] === 1 ? '' : 's');
+        return counts[type] + ' ' + type;
     }).join(', ');
 }
 function tocAnalysisSummary(analysis, counts, status) {
@@ -806,9 +806,9 @@ function renderReleaseSection(parent, version, rdata, status, jim) {
     // Breakdown
     var b = counts;
     var bd = h('div', 'breakdown');
-    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-build', String(b.build || 0)), ' Build failure groups']));
-    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-test', String(b.test || 0)), ' Test failure groups']));
-    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-infra', String(b.infrastructure || 0)), ' Infrastructure failure groups']));
+    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-build', String(b.build || 0)), ' Build']));
+    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-test', String(b.test || 0)), ' Test']));
+    bd.appendChild(h('span', 'breakdown-item', [h('strong', 'bd-infra', String(b.infrastructure || 0)), ' Infrastructure']));
     sec.appendChild(bd);
     var panels = h('div', 'section-panels');
     // All Jobs table
@@ -2342,8 +2342,9 @@ def main():
                 passed = sum(1 for j in status if j.get("status") == "success")
                 rate = round(passed / total * 100) if total > 0 else 0
                 extra = f" ({passed}/{total} passed, {rate}% pass rate)"
-            print(f"    Release {version}: {len(rdata.get('issues', []))} failure groups "
-                  f"({rdata['total_failed']} producer job/group associations){extra}")
+            print(f"    Release {version}: {len(rdata.get('issues', []))} "
+                  f"{'failure' if len(rdata.get('issues', [])) == 1 else 'failures'} "
+                  f"({rdata['total_failed']} producer job/entry associations){extra}")
         else:
             print(f"    Release {version}: no data")
     print("  Pull Requests:")
