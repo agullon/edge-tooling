@@ -1,6 +1,27 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
+function suppliedFinishedLabel(value) {
+    let date;
+    if (typeof value === 'number' ||
+        (typeof value === 'string' && /^[+-]?\d+(?:\.\d+)?$/.test(value.trim()))) {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds)) return '';
+        date = new Date(seconds * 1000);
+    } else if (typeof value === 'string') {
+        const iso = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(value.trim());
+        if (!iso) return '';
+        const year = Number(iso[1]);
+        const month = Number(iso[2]);
+        const day = Number(iso[3]);
+        const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+        const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        if (month < 1 || month > 12 || day < 1 || day > days[month - 1]) return '';
+        date = new Date(value.trim());
+    } else return '';
+    return Number.isFinite(date.getTime()) ? date.toISOString().replace('T', ' ').slice(0, 16) : '';
+}
+
 module.exports = function(data, today, release) {
     const sourceISO = '2026-10-15T01:21:52Z';
     const epoch = Date.parse(sourceISO) / 1000;
@@ -18,6 +39,8 @@ module.exports = function(data, today, release) {
         [yesterday + 'T23:30:00-02:00', today + 'T01:30:00Z'],
     ].map(([finished, iso], index) => ({job: 'timestamp-' + index, url: 'https://example.invalid/time-' + index,
         status: 'success', duration: 60, finished, iso}));
+    fixtures.forEach(job => assert.equal(suppliedFinishedLabel(job.finished),
+        job.iso ? job.iso.replace('T', ' ').slice(0, 16) : '', job.job));
     data.releases_data = {'timestamps': release([])};
     data.status_data = {'timestamps': fixtures};
     data.pr_data = null; data.pr_status = null;
@@ -46,7 +69,7 @@ module.exports = function(data, today, release) {
             assert.equal(suppliedRows.length, suppliedJobs.length);
             suppliedRows.forEach(row => {
                 const value = row.reportJob.finished;
-                const expected = value ? new Date(value).toISOString().replace('T', ' ').slice(0, 16) : '';
+                const expected = suppliedFinishedLabel(value);
                 assert.equal(row.cells[2].textContent, expected);
             });
             console.log('PASS supplied Finished timestamps: ' + suppliedRows.length + ' actual job rows');
