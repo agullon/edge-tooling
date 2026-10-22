@@ -91,6 +91,7 @@ CSS = """\
         .overview-card .label { color: #6c757d; font-size: 0.9em; }
         .job-date { font-weight: 400; color: #6c757d; font-size: 0.85em; }
         .issues-table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        .issues-table th { text-align: left; padding: 8px 6px; border-bottom: 2px solid #dee2e6; font-size: 0.85em; color: #6c757d; text-transform: uppercase; }
         .issues-table td { padding: 5px 6px; vertical-align: middle; }
         .issues-table .col-link { width: 24px; text-align: center; }
         .issues-table .col-sev { width: 78px; }
@@ -251,9 +252,24 @@ function sectionAnchor(id) {
 }
 
 // === Formatters ===
+function finishedISO(v) {
+    var timestamp;
+    if (typeof v === 'number') timestamp = v * 1000;
+    else if (typeof v === 'string') {
+        var value = v.trim();
+        if (/^[+-]?\\d+(?:\\.\\d+)?$/.test(value)) timestamp = Number(value) * 1000;
+        else if (/^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$/.test(value)) {
+            var calendar = new Date(value.substring(0, 10) + 'T00:00:00Z');
+            if (!Number.isFinite(calendar.getTime()) || calendar.toISOString().substring(0, 10) !== value.substring(0, 10)) return '';
+            timestamp = Date.parse(value);
+        }
+    }
+    if (!Number.isFinite(timestamp)) return '';
+    var date = new Date(timestamp);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : '';
+}
 function fmtEpoch(v) {
-    try { var d = new Date(parseInt(v, 10) * 1000); return d.toISOString().replace('T', ' ').substring(0, 16); }
-    catch(e) { return String(v || ''); }
+    return finishedISO(v).replace('T', ' ').substring(0, 16);
 }
 function fmtDuration(v) {
     try {
@@ -366,8 +382,7 @@ function periodicTocStatus(version, query, day) {
     if (!Array.isArray(jobs)) return null;
     var issues = ((D.releases_data || {})[version] || {}).issues || [];
     jobs = jobs.filter(function(job) {
-        var finished = String(job.finished || '');
-        var date = /^\\d+$/.test(finished) ? fmtEpoch(finished) : finished;
+        var date = finishedISO(job.finished);
         return (!day || date.substring(0, 10) === day) &&
             (matchSearch(job.job || '', query) ||
             relatedIssues(job, issues).some(function(issue) { return matchIssueText(issue, query); }));
@@ -575,6 +590,13 @@ function renderAffectedJobs(parent, jobs) {
 function renderIssueTable(parent, issues, anchorPrefix, sourceLabel) {
     if (!issues || !issues.length) return;
     var table = h('table', 'issues-table');
+    var thead = document.createElement('thead');
+    var headerRow = document.createElement('tr');
+    ['Severity', 'Type', 'Failure', 'Jobs', 'Link'].forEach(function(label) {
+        headerRow.appendChild(setAttr(h('th', '', label), {scope: 'col'}));
+    });
+    thead.appendChild(headerRow); table.appendChild(thead);
+    var tbody = document.createElement('tbody');
     issues.forEach(function(issue) {
         var jc = issue.job_count || 0;
         var sev = (issue.severity || 'UNKNOWN').toUpperCase();
@@ -598,7 +620,7 @@ function renderIssueTable(parent, issues, anchorPrefix, sourceLabel) {
         var tdLink = h('td', 'col-link', anchorLink(anchorId));
         tr.appendChild(tdSev); tr.appendChild(tdFtype); tr.appendChild(tdTitle);
         tr.appendChild(tdJobs); tr.appendChild(tdLink);
-        table.appendChild(tr);
+        tbody.appendChild(tr);
         // Expand/collapse
         tdTitle.addEventListener('click', function() {
             this.classList.toggle('active');
@@ -628,8 +650,9 @@ function renderIssueTable(parent, issues, anchorPrefix, sourceLabel) {
             p.appendChild(h('em', '', 'Next Steps: ')); p.appendChild(document.createTextNode(issue.next_steps));
             dtd.appendChild(p);
         }
-        dtr.appendChild(dtd); table.appendChild(dtr);
+        dtr.appendChild(dtd); tbody.appendChild(dtr);
     });
+    table.appendChild(tbody);
     parent.appendChild(table);
 }
 
@@ -846,7 +869,7 @@ function renderReleaseSection(parent, version, rdata, status, jim) {
         });
         thead.appendChild(thRow); jTable.appendChild(thead);
         var tbody = document.createElement('tbody');
-        var sorted = status.slice().sort(function(a,b) { return (a.finished||'').toString().localeCompare((b.finished||'').toString()); });
+        var sorted = status.slice().sort(function(a,b) { return finishedISO(a.finished).localeCompare(finishedISO(b.finished)); });
         sorted.forEach(function(sj) {
             var tr = h('tr', 'job-row');
             tr.reportJob = sj;
@@ -862,7 +885,7 @@ function renderReleaseSection(parent, version, rdata, status, jim) {
             if (sj.url) { nameTd.appendChild(makeLink(sj.url, sj.job || '', '', '_blank')); }
             else { nameTd.textContent = sj.job || ''; }
             tr.appendChild(nameTd);
-            tr.appendChild(h('td', '', fmtEpoch(sj.finished)));
+            tr.appendChild(setAttr(h('td', '', fmtEpoch(sj.finished)), {'data-sort-value': finishedISO(sj.finished)}));
             tr.appendChild(h('td', '', fmtDuration(sj.duration)));
             // Issues cross-reference
             var issTd = document.createElement('td'); issTd.style.fontSize = '0.85em';
@@ -1248,8 +1271,8 @@ document.querySelectorAll('.data-table').forEach(function(table) {
         var tbody = table.querySelector('tbody');
         var rows = Array.from(tbody.querySelectorAll('tr'));
         rows.sort(function(a, b) {
-            var av = a.cells[colIdx].textContent.trim().toLowerCase();
-            var bv = b.cells[colIdx].textContent.trim().toLowerCase();
+            var av = (a.cells[colIdx].getAttribute('data-sort-value') || a.cells[colIdx].textContent).trim().toLowerCase();
+            var bv = (b.cells[colIdx].getAttribute('data-sort-value') || b.cells[colIdx].textContent).trim().toLowerCase();
             return asc ? av.localeCompare(bv) : bv.localeCompare(av);
         });
         rows.forEach(function(r) { tbody.appendChild(r); });
@@ -1416,8 +1439,7 @@ function renderAppliedFilter() {
     });
     document.querySelectorAll('#tab-periodics .job-row').forEach(function(row) {
         var job = row.reportJob;
-        var finished = String(job.finished || '');
-        var finishedDate = /^\\d+$/.test(finished) ? fmtEpoch(finished) : finished;
+        var finishedDate = finishedISO(job.finished);
         row.reportEligible = !day || finishedDate.substring(0, 10) === day;
         var matches = matchSearch(job.job || '', query) ||
             row.reportIssues.some(function(issue) { return matchIssueText(issue, query); });
