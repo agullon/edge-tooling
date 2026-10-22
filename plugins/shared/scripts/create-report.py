@@ -91,6 +91,7 @@ CSS = """\
         .overview-card .label { color: #6c757d; font-size: 0.9em; }
         .job-date { font-weight: 400; color: #6c757d; font-size: 0.85em; }
         .issues-table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        .issues-table th { text-align: left; padding: 8px 6px; border-bottom: 2px solid #dee2e6; font-size: 0.85em; color: #6c757d; text-transform: uppercase; }
         .issues-table td { padding: 5px 6px; vertical-align: middle; }
         .issues-table .col-link { width: 24px; text-align: center; }
         .issues-table .col-sev { width: 78px; }
@@ -589,6 +590,13 @@ function renderAffectedJobs(parent, jobs) {
 function renderIssueTable(parent, issues, anchorPrefix, sourceLabel) {
     if (!issues || !issues.length) return;
     var table = h('table', 'issues-table');
+    var thead = document.createElement('thead');
+    var headerRow = document.createElement('tr');
+    ['Severity', 'Type', 'Failure', 'Jobs', 'Link'].forEach(function(label) {
+        headerRow.appendChild(setAttr(h('th', '', label), {scope: 'col'}));
+    });
+    thead.appendChild(headerRow); table.appendChild(thead);
+    var tbody = document.createElement('tbody');
     issues.forEach(function(issue) {
         var jc = issue.job_count || 0;
         var sev = (issue.severity || 'UNKNOWN').toUpperCase();
@@ -612,7 +620,7 @@ function renderIssueTable(parent, issues, anchorPrefix, sourceLabel) {
         var tdLink = h('td', 'col-link', anchorLink(anchorId));
         tr.appendChild(tdSev); tr.appendChild(tdFtype); tr.appendChild(tdTitle);
         tr.appendChild(tdJobs); tr.appendChild(tdLink);
-        table.appendChild(tr);
+        tbody.appendChild(tr);
         // Expand/collapse
         tdTitle.addEventListener('click', function() {
             this.classList.toggle('active');
@@ -642,8 +650,9 @@ function renderIssueTable(parent, issues, anchorPrefix, sourceLabel) {
             p.appendChild(h('em', '', 'Next Steps: ')); p.appendChild(document.createTextNode(issue.next_steps));
             dtd.appendChild(p);
         }
-        dtr.appendChild(dtd); table.appendChild(dtr);
+        dtr.appendChild(dtd); tbody.appendChild(dtr);
     });
+    table.appendChild(tbody);
     parent.appendChild(table);
 }
 

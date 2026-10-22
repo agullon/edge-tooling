@@ -220,10 +220,44 @@ const rendererEnd = renderer.lastIndexOf('})();');
 const testExports = 'window.reportTest = {data: D, renderOverview, renderPeriodics, renderPRs, applyReportFilter, get appliedFilter() { return appliedFilter; }, get pendingRegex() { return pendingRegex; }};\n';
 vm.runInContext(renderer.slice(0, rendererEnd) + testExports + renderer.slice(rendererEnd), context);
 const reportTest = context.window.reportTest;
+function assertFailureHeaders(parent) {
+    parent.querySelectorAll('.issues-table').forEach(table => {
+        assert(!table.classList.contains('data-table'));
+        const headers = table.querySelectorAll('thead th');
+        assert.deepEqual(headers.map(header => header.textContent), ['Severity', 'Type', 'Failure', 'Jobs', 'Link']);
+        headers.forEach(header => {
+            assert.equal(header.getAttribute('scope'), 'col');
+            assert.equal((header.listeners.click || []).length, 0);
+        });
+        const rows = table.querySelectorAll('tbody tr');
+        assert.equal(rows.length, table.querySelectorAll('.issue-row').length * 2);
+        rows.forEach((row, index) => {
+            if (index % 2 === 0) {
+                assert(row.classList.contains('issue-row'));
+                assert.equal(row.cells.length, headers.length);
+                assert.equal(row.cells[0].textContent, (row.reportIssue.severity || 'UNKNOWN').toUpperCase());
+                assert.equal(row.cells[2].textContent, row.reportIssue.title);
+                assert.equal(row.cells[3].textContent, `${row.reportIssue.job_count} ${row.reportIssue.job_count === 1 ? 'job' : 'jobs'}`);
+                const detail = row.nextElementSibling;
+                row.cells[2].click(); assert(detail.classList.contains('show'));
+                row.cells[2].click(); assert(!detail.classList.contains('show'));
+            } else {
+                assert(row.classList.contains('detail-row'));
+                assert.equal(row.cells.length, 1);
+                assert.equal(row.cells[0].colSpan, headers.length);
+            }
+        });
+    });
+}
+assertFailureHeaders(document.getElementById('tab-periodics'));
+assertFailureHeaders(document.getElementById('tab-pull-requests'));
 if (finishedTests) {
     await finishedTests({document, reportTest});
     return;
 }
+assert(document.querySelector('#tab-periodics .issues-table'));
+assert(document.querySelector('#tab-pull-requests .issues-table'));
+console.log('PASS failure headers: periodic and PR semantic columns, aligned cells, detail spans, expansion and no added sorting');
 const input = document.getElementById('report-filter');
 const counts = () => document.getElementById('filter-count').textContent;
 const visible = selector => document.querySelectorAll(selector).filter(row => row.style.display !== 'none');
@@ -336,6 +370,10 @@ function renderGroupFixture(releases, statuses = {}) {
     overview.textContent = '';
     reportTest.renderOverview(overview);
     reportTest.renderPeriodics(periodics);
+    assertFailureHeaders(periodics);
+    Object.entries(releases).filter(([, entry]) => entry && !(entry.issues || []).length).forEach(([version]) => {
+        assert.equal(document.getElementById('release-' + version).querySelector('.issues-table'), null);
+    });
 }
 function assertGroupSummary(version, groupCount, runCount, breakdown, suffix = '') {
     const section = document.getElementById('release-' + version);
@@ -596,6 +634,25 @@ if (process.argv[4] === '--regex-tests') {
     await require('./test_report_regex.js')({context, document, reportTest, query, counts, visible, visibleJobUrls,
         renderGroupFixture, originalFilterData, downloads, issue, affected, status, release});
 }
+const prsParent = document.getElementById('tab-pull-requests');
+reportTest.data.pr_data = originalFilterData.pr_data;
+for (const prStatus of [null, [{pr_number: 7, passed: 0, failed: 1, pending: 0, total: 1}]]) {
+    reportTest.data.pr_status = prStatus;
+    prsParent.textContent = '';
+    reportTest.renderPRs(prsParent);
+    assert(prsParent.querySelector('.issues-table'));
+    assertFailureHeaders(prsParent);
+}
+reportTest.data.pr_data = {prs: [{number: 7, issues: []}]};
+prsParent.textContent = '';
+reportTest.renderPRs(prsParent);
+assert.equal(prsParent.querySelector('.issues-table'), null);
+reportTest.data.pr_data = null;
+reportTest.data.pr_status = null;
+prsParent.textContent = '';
+reportTest.renderPRs(prsParent);
+assert.equal(prsParent.querySelector('.issues-table'), null);
+console.log('PASS failure headers: PR status and analysis-only fallback, empty analysis and absent jobs');
 
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
