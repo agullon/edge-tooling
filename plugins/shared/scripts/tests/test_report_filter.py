@@ -51,10 +51,17 @@ class ReportFilterTests(unittest.TestCase):
                 ["node", str(Path(__file__).with_name("test_report_filter.js")), str(renderer), "", "--regex-tests", str(html)],
                 capture_output=True, text=True, check=False,
             )
+            finished = subprocess.run(
+                ["node", str(Path(__file__).with_name("test_report_filter.js")), str(renderer), "", "--regex-tests", str(html), "--finished-tests"],
+                capture_output=True, text=True, check=False,
+            )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+        self.assertIn("PASS Finished regressions", finished.stdout)
         self.assertIn("PASS renderer filter regressions", result.stdout)
         self.assertIn("PASS isolated regex regressions", result.stdout)
         print(result.stdout.strip())
+        print(finished.stdout.strip())
 
 
 if __name__ == "__main__":

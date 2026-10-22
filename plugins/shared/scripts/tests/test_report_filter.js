@@ -169,6 +169,7 @@ const data = {
     bugs_tab_data: {linked: [{key: 'BUG_ONLY', summary: 'add hidden bug', status: 'New'}], unlinked: [], jira_query_available: false},
 };
 const originalFilterData = JSON.parse(JSON.stringify(data));
+const finishedTests = process.argv[6] === '--finished-tests' ? require('./test_report_finished.js')(data, today, release) : null;
 const body = new Element('body');
 const document = {
     body, createElement: tag => new Element(tag),
@@ -219,6 +220,10 @@ const rendererEnd = renderer.lastIndexOf('})();');
 const testExports = 'window.reportTest = {data: D, renderOverview, renderPeriodics, renderPRs, applyReportFilter, get appliedFilter() { return appliedFilter; }, get pendingRegex() { return pendingRegex; }};\n';
 vm.runInContext(renderer.slice(0, rendererEnd) + testExports + renderer.slice(rendererEnd), context);
 const reportTest = context.window.reportTest;
+if (finishedTests) {
+    await finishedTests({document, reportTest});
+    return;
+}
 const input = document.getElementById('report-filter');
 const counts = () => document.getElementById('filter-count').textContent;
 const visible = selector => document.querySelectorAll(selector).filter(row => row.style.display !== 'none');
