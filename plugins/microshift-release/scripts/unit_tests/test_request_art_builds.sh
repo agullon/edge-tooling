@@ -43,23 +43,22 @@ jq -e -s '
 ' "${CASE_DIR}/requests.jsonl" >/dev/null
 jq -e -s '
   [.[] | select(.method == "POST" and (.url | endswith("/issueLink")))
-    | .data | fromjson] == [{type: {id: "500"},
-      inwardIssue: {key: "USHIFT-202"}, outwardIssue: {key: "ART-101"}}]
+    | .data | fromjson] == [
+      {type: {id: "500"}, inwardIssue: {key: "USHIFT-202"}, outwardIssue: {key: "ART-101"}},
+      {type: {id: "501"}, inwardIssue: {key: "USHIFT-202"}, outwardIssue: {key: "USHIFT-6945"}}]
 ' "${CASE_DIR}/requests.jsonl" >/dev/null
 jq -e -s 'length == 1 and (.[0].text | contains("ART-101"))' \
   "${CASE_DIR}/slack.jsonl" >/dev/null
+
+# Related is non-directional: Jira may report the ART key as inwardIssue.
+run_case inward_link
+jq -e -s '[.[] | select(.method == "POST" and (.url | endswith("/issueLink")))] | length == 2' \
+  "${CASE_DIR}/requests.jsonl" >/dev/null
 
 run_case reuse_desired
 test "$(cat "${CASE_DIR}/stdout")" = "ART-55 USHIFT-66"
 jq -e -s 'all(.[]; .method == "GET")' "${CASE_DIR}/requests.jsonl" >/dev/null
 test ! -s "${CASE_DIR}/slack.jsonl"
-
-if run_case reverse_link; then
-  printf 'FAIL: reverse link was accepted\n' >&2
-  exit 1
-fi
-grep -Fq 'Conflicting reverse link detected' "${CASE_DIR}/stderr"
-jq -e -s 'all(.[]; (.url | endswith("/issueLink")) | not)' "${CASE_DIR}/requests.jsonl" >/dev/null
 
 run_case dry_run --dry-run
 jq -e -s 'all(.[]; .method == "GET")' "${CASE_DIR}/requests.jsonl" >/dev/null
@@ -71,6 +70,19 @@ jq -e -s '
 ' "${CASE_DIR}/requests.jsonl" >/dev/null
 jq -e -s 'length == 1 and (.[0].text | contains("ART-55"))' \
   "${CASE_DIR}/slack.jsonl" >/dev/null
+
+if run_case readback_missing; then
+  printf 'FAIL: link without readback verification was accepted\n' >&2
+  exit 1
+fi
+grep -Fq 'readback verification failed' "${CASE_DIR}/stderr"
+
+if run_case missing_cloners; then
+  printf 'FAIL: missing Cloners link type was accepted\n' >&2
+  exit 1
+fi
+grep -Fq "Link type 'Cloners'" "${CASE_DIR}/stderr"
+jq -e -s 'all(.[]; .method == "GET")' "${CASE_DIR}/requests.jsonl" >/dev/null
 
 SYNTHETIC_USER="synthetic-${RANDOM}"
 SYNTHETIC_PASSWORD="synthetic-${RANDOM}"
@@ -87,7 +99,7 @@ if grep -Fq "${CASE_JIRA_BASE_URL#https://}" "${CASE_DIR}/stderr"; then
 fi
 
 unset CASE_JIRA_BASE_URL
-printf 'PASS: all 6 offline cases\n'
+printf 'PASS: all 8 offline cases\n'
 
 CASE_SHELL_OPTION=-x
 run_case new_success
