@@ -44,14 +44,20 @@ class TestHelpers(unittest.TestCase):
 
     def test_sprints_from_jira_string_form(self):
         raw = ["com.atlassian.greenhopper.service.sprint.Sprint@1[id=123,rapidViewId=1,state=ACTIVE,name=OCPEDGE Sprint 295,goal=]"]
-        assert _jt.extract_sprints(raw) == [{"id": 123, "name": "OCPEDGE Sprint 295"}]
+        assert _jt.extract_sprints(raw) == [{"id": 123, "name": "OCPEDGE Sprint 295", "end": None}]
 
     def test_sprints_from_dicts(self):
-        assert _jt.extract_sprints([{"id": "7", "name": "S 1"}]) == [{"id": 7, "name": "S 1"}]
+        assert _jt.extract_sprints([{"id": "7", "name": "S 1"}]) == [{"id": 7, "name": "S 1", "end": None}]
+
+    def test_sprints_dict_carries_end_date(self):
+        # endDate (or completeDate) is normalized to YYYY-MM-DD for velocity's
+        # latest-ending-sprint selection.
+        assert _jt.extract_sprints([{"id": 7, "name": "S 1", "endDate": "2026-06-30T00:00:00.000Z"}]) == [
+            {"id": 7, "name": "S 1", "end": "2026-06-30"}]
 
     def test_sprints_non_matching_string_keeps_name_without_id(self):
         # A plain string with no "id=...,name=..." payload is kept verbatim as the name.
-        assert _jt.extract_sprints(["Backlog"]) == [{"id": None, "name": "Backlog"}]
+        assert _jt.extract_sprints(["Backlog"]) == [{"id": None, "name": "Backlog", "end": None}]
 
     def test_sprints_empty_inputs_give_no_records(self):
         for empty in (None, "", [], [""]):
@@ -60,7 +66,7 @@ class TestHelpers(unittest.TestCase):
     def test_sprints_partial_payload_without_name_is_not_matched(self):
         # id= present but no name= -> regex does not match; the raw string is kept as the name.
         raw = "com.x.Sprint@1[id=123,state=ACTIVE]"
-        assert _jt.extract_sprints([raw]) == [{"id": None, "name": raw}]
+        assert _jt.extract_sprints([raw]) == [{"id": None, "name": raw, "end": None}]
 
     def test_sprint_number(self):
         assert _jt.extract_sprint_number("OpenShift Edge Sprint 296") == 296
@@ -244,7 +250,8 @@ class TestMethodBlock(unittest.TestCase):
             "dq_pass", "dq_warn", "dq_fail")}
         meta["focus_priorities"] = ["Blocker", "Critical", "Major"]
         meta["include_lower_when"] = ["Refinement"]
-        hidden = {"unpointed_open": 0, "unpointed_assigned": 0, "sp_per_story_low": 2, "sp_per_story_typical": 3,
+        hidden = {"unpointed_open": 0, "unpointed_assigned": 0, "unpointed_bugs": 0, "unpointed_bug_keys": [],
+                  "sp_per_story_low": 2, "sp_per_story_typical": 3,
                   "sp_per_story_high": 5, "estimate_low": 0, "estimate_typical": 0, "estimate_high": 0, "basis": "x"}
         method = _mod.build_method(meta, _roster(("a", "A", 8)), 2, hidden, 30, (293, 296), "5.1")
         ids = [m["id"] for m in method]
@@ -354,7 +361,7 @@ class TestGateExclusionAndEmptyEpics(unittest.TestCase):
         g = _mod.run_data_quality_gate([f])[0]
         assert g["status"] == "WARN"
         assert g["empty_epic_count"] == 2
-        assert g["reason"] == "2 of 3 epics have no stories"
+        assert g["reason"] == "2 of 3 epics have no non-bug stories"
 
     def test_all_epics_populated_stays_pass(self):
         story = _story("OCPEDGE-1", sp=5, epic_key="E-1", status="To Do")
@@ -412,8 +419,9 @@ class TestPriorityFocus(unittest.TestCase):
         in_focus, depri = _mod.partition_by_priority([f], focus={"Normal"}, include_statuses=set())
         assert in_focus == [f] and depri == []
 
-    def test_deprioritized_open_sp_sums_only_open_non_bug(self):
-        # One open pointed story (counts), one closed story (excluded), one open bug (excluded).
+    def test_deprioritized_open_sp_includes_open_bugs(self):
+        # Bugs are pointed and counted like other work (edge-context decision 0003):
+        # one open story and one open bug count; the closed story is excluded.
         stories = [
             _story("S-1", sp=5, status="To Do"),
             _story("S-2", sp=8, status="Closed"),
@@ -422,8 +430,8 @@ class TestPriorityFocus(unittest.TestCase):
         f = _feature(priority="Normal", status="New", stories=stories)
         _, depri = _mod.partition_by_priority([f])
         open_sp = sum(s["sp"] for g in depri for s in g["all_stories"]
-                      if not _mod.is_story_done(s) and s["type"] != "Bug")
-        assert open_sp == 5
+                      if not _mod.is_story_done(s))
+        assert open_sp == 8
 
 
 if __name__ == "__main__":

@@ -4,13 +4,13 @@ Agents, skills, and workflows for scrum process management on the OpenShift Edge
 
 ## Reference Documents
 
-**[`Edge-Scrum-Laws.md`](references/Edge-Scrum-Laws.md)** — The authoritative governance document for the OCPEDGE unified scrum. Skills and agents load specific law files from [`references/laws/`](references/laws/) at runtime. It defines:
+**[`Edge-Scrum-Laws.md`](references/Edge-Scrum-Laws.md)** — A condensed, agent-oriented copy of the team's rules; [openshift-eng/edge-context](https://github.com/openshift-eng/edge-context) is authoritative (see its Source of Truth section). Skills and agents load specific law files from [`references/laws/`](references/laws/) at runtime. It defines:
 
-- **Team roster** — 18 team members with Jira usernames and per-sprint SP targets
+- **Team roster** — 18 team members with Jira usernames and per-sprint SP targets, which are used **only as a roster fallback** when the team's velocity can't be measured (capacity is otherwise planned against measured velocity — decision 0015)
 - **Jira projects** — OCPEDGE, OCPBUGS, OCPSTRAT, USHIFT and their roles
 - **Issue types and sizing** — Story/Spike/Task/Bug (fibonacci SP), Epic/Feature/Initiative (T-shirt sizes)
 - **Workflow states** — per issue type, including the OCPBUGS bug lifecycle
-- **Sprint policies** — 8 SP/person target, churn rules, bug handling
+- **Sprint policies** — team-velocity planning (~8 SP/person soft guideline), bug handling
 - **Bug triage process** — severity, priority, target versions, PR title format
 - **Epic and feature refinement** — required fields, description template, SME responsibilities
 - **Key roles** — SME, Epic Assignee, Scrum Master, Team Lead, Payload Manager
@@ -93,7 +93,7 @@ Assesses whether the team can deliver planned scope within remaining time. Class
 1. **Verdict** — overall risk, pointed scope vs capacity, hidden (unpointed) scope as a range, gap
 2. **Decisions needed this week** — up to five rows with what it frees, an owner role and a deadline
 3. **Where the cut line falls** — active features in PM rank order with cumulative SP against capacity
-4. **People over target** — assigned vs capacity, unpointed work shown separately, roster drift flagged
+4. **People far above the soft guideline** — assigned vs capacity, unpointed work shown separately, roster drift flagged
 5. **Not started (focus priorities)** — Blocker/Critical/Major features still in New with no evidence of work; lower priorities are listed in the appendix only
 6. **Process gaps** — roster drift, just-in-time pointing, missing SMEs, sizing, excluded epics
 7. **How the numbers are computed** — formula, inputs and result for every headline figure

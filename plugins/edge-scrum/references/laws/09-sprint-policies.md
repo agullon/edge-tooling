@@ -1,15 +1,9 @@
 # Edge Scrum Law: Sprint Policies
 
 > The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+>
+> **Canonical source:** edge-context [`procedures/scrum/story-pointing.md`](https://github.com/openshift-eng/edge-context/blob/main/procedures/scrum/story-pointing.md). If this file and edge-context disagree, edge-context is authoritative and this file must be updated.
 
-## Sprint Capacity Target
+## Sprint Capacity
 
-Each team member targets **8 story points per sprint** (acceptable range: 8–10). Capacity is adjusted for PTO and holidays. MUST NOT plan a sprint that is overcommitted or undercommitted relative to the calculated capacity.
-
-## Sprint Churn
-
-Churn = adding or removing a story after the sprint has started.
-
-**Rule:** When churning an item **in**, MUST churn an equal number of story points **out**. This maintains the sprint's SP goal and prevents scope creep.
-
-**For bugs:** We plan sprints against the ideal case (no unexpected bugs). When a bug occurs, decide if it's important enough to displace a planned story. If yes, remove equal SP before adding the bug.
+Sprint and release capacity is planned against the **team's measured velocity** — the average completed story points over the last 3 closed sprints, adjusted for PTO and holidays (edge-context decision 0015). There is **no fixed per-person story-point limit**; ~8 story points per person per sprint is a **soft guideline** for sanity-checking load, not a cap. A sprint that is over- or under-committed relative to the team's velocity is a signal to review scope at planning (adjust up or down as needed), not a violation.

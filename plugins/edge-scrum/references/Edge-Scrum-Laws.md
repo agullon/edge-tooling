@@ -2,6 +2,10 @@
 
 Navigation index for OpenShift Edge team scrum governance. This file is **not normative** — RFC 2119 language does not apply here. Rules live in `laws/`.
 
+## Source of Truth
+
+How the team works is defined in [openshift-eng/edge-context](https://github.com/openshift-eng/edge-context) (`procedures/`, `procedures/refinement-checklists/`, `roles/`). The law files here are a condensed, agent-oriented copy that skills load at runtime. Each law file names its canonical edge-context source at the top. When a law and edge-context disagree, edge-context is authoritative and the law must be updated in the same change that updates edge-context. Files 06 (field IDs) and 14 (agent conventions) are agent-specific and maintained here.
+
 ## Agent Task Index
 
 Load only the law files your task requires. Do not read the entire `laws/` directory unless comprehensive coverage is explicitly needed.
@@ -31,7 +35,7 @@ Load only the law files your task requires. Do not read the entire `laws/` direc
 | [`laws/06-jira-fields.md`](laws/06-jira-fields.md) | Custom field IDs and usage |
 | [`laws/07-workflow-states.md`](laws/07-workflow-states.md) | Valid workflow states per issue type |
 | [`laws/08-ceremonies.md`](laws/08-ceremonies.md) | Sprint ceremonies and cadence |
-| [`laws/09-sprint-policies.md`](laws/09-sprint-policies.md) | Sprint capacity and churn policies |
+| [`laws/09-sprint-policies.md`](laws/09-sprint-policies.md) | Sprint capacity policies |
 | [`laws/10-bug-triage.md`](laws/10-bug-triage.md) | Bug triage process and severity rules |
 | [`laws/11-work-prioritization.md`](laws/11-work-prioritization.md) | Work prioritization rules |
 | [`laws/12-epic-feature-refinement.md`](laws/12-epic-feature-refinement.md) | Refinement process for Epics and Features |

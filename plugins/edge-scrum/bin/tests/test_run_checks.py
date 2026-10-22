@@ -2,7 +2,9 @@
 
 import sys
 import os
+import io
 import unittest
+from contextlib import redirect_stderr
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from importlib import import_module
@@ -12,10 +14,15 @@ build_hierarchy = _mod.build_hierarchy
 run_data_quality_gate = _mod.run_data_quality_gate
 run_capacity_check = _mod.run_capacity_check
 run_timeline_check = _mod.run_timeline_check
+velocity_scaling_factor = _mod.velocity_scaling_factor
 run_assignment_check = _mod.run_assignment_check
 run_bug_load_check = _mod.run_bug_load_check
 run_sizing_check = _mod.run_sizing_check
 run_composite_check = _mod.run_composite_check
+team_capacity = _mod.team_capacity
+estimate_hidden_scope = _mod.estimate_hidden_scope
+load_velocity = _mod.load_velocity
+parse_availability = _mod.parse_availability
 is_story_done = _mod.is_story_done
 
 
@@ -77,11 +84,23 @@ class TestDataQualityGate(unittest.TestCase):
         result = run_data_quality_gate([f])
         assert result[0]["status"] == "WARN"
 
-    def test_bugs_dont_count_for_gate(self):
-        stories = [_story("B-1", issue_type="Bug", sp=0)]
+    def test_bugs_count_as_issues_for_gate(self):
+        # Bugs count as issues like other work (edge-context decision 0003): a feature
+        # whose epics hold a pointed bug no longer FAILs for "no stories". A bug-only
+        # epic is still not feature-refined, so the overlay downgrades it to WARN
+        # (independent of the bug's points counting toward scope).
+        stories = [_story("B-1", issue_type="Bug", sp=3)]
         f = _feature(epics=[{"key": "E-1", "stories": stories}], all_stories=stories)
         result = run_data_quality_gate([f])
-        assert result[0]["status"] == "FAIL"
+        assert result[0]["status"] == "WARN"
+
+    def test_bug_with_story_passes_gate(self):
+        # With a real story in the epic, the overlay is satisfied and the pointed bug
+        # counts toward the pointed ratio (edge-context decision 0003).
+        stories = [_story("S-1", sp=5), _story("B-1", issue_type="Bug", sp=3)]
+        f = _feature(epics=[{"key": "E-1", "stories": stories}], all_stories=stories)
+        result = run_data_quality_gate([f])
+        assert result[0]["status"] == "PASS"
 
     def test_closed_unpointed_excluded_from_pointed_pct(self):
         stories = [
@@ -95,14 +114,25 @@ class TestDataQualityGate(unittest.TestCase):
 
 
 class TestCapacityCheck(unittest.TestCase):
-    def test_over_capacity(self):
-        stories = [_story("S-1", "alice@example.com", sp=20)]
+    def test_far_above_guideline_flagged(self):
+        # guideline = 8 × 2 = 16; flagged only when far above (> 1.5 × = 24).
+        stories = [_story("S-1", "alice@example.com", sp=25)]
         f = _feature(all_stories=stories)
         gate = [{"feature_key": f["key"], "status": "PASS"}]
         roster = _roster(("alice@example.com", "Alice", 8))
         result = run_capacity_check([f], gate, roster, 2)
-        assert result[0]["status"] == "OVER"
-        assert result[0]["overrun"] == 4
+        assert result[0]["status"] == "ABOVE_GUIDELINE"
+        assert result[0]["overrun"] == 9
+
+    def test_slightly_over_guideline_not_flagged(self):
+        # 18 SP is over the 16 guideline but not far above it (< 24): a normal
+        # overrun is left OK, not treated as a capacity risk (must-fix item 3).
+        stories = [_story("S-1", "alice@example.com", sp=18)]
+        f = _feature(all_stories=stories)
+        gate = [{"feature_key": f["key"], "status": "PASS"}]
+        roster = _roster(("alice@example.com", "Alice", 8))
+        result = run_capacity_check([f], gate, roster, 2)
+        assert result[0]["status"] == "OK"
 
     def test_under_capacity(self):
         stories = [_story("S-1", "alice@example.com", sp=5)]
@@ -125,16 +155,17 @@ class TestCapacityCheck(unittest.TestCase):
         assert result[0]["assigned_sp"] == 0
         assert result[0]["remaining_capacity"] == 16
 
-    def test_excludes_bugs_from_sp(self):
+    def test_includes_bugs_in_sp(self):
+        # Bugs load a person like other pointed work (edge-context decision 0003).
         stories = [
             _story("S-1", "alice@example.com", sp=5),
-            _story("B-1", "alice@example.com", sp=0, issue_type="Bug"),
+            _story("B-1", "alice@example.com", sp=3, issue_type="Bug"),
         ]
         f = _feature(all_stories=stories)
         gate = [{"feature_key": f["key"], "status": "PASS"}]
         roster = _roster(("alice@example.com", "Alice", 8))
         result = run_capacity_check([f], gate, roster, 2)
-        assert result[0]["assigned_sp"] == 5
+        assert result[0]["assigned_sp"] == 8
 
     def test_non_roster_flagged(self):
         stories = [_story("S-1", "bot@x.com", sp=5)]
@@ -189,6 +220,82 @@ class TestTimelineCheck(unittest.TestCase):
         result = run_timeline_check([f], gate, roster, 0)
         assert result[0]["risk"] == "HIGH"
 
+    def test_effective_sprints_flips_risk_to_high(self):
+        # A feature needing ~2 sprints is OK against 3 raw sprints, but HIGH once
+        # availability cuts the effective sprints to 1.3 — matching the capacity cut-line.
+        stories = [_story("S-1", "alice@example.com", sp=16)]
+        f = _feature(all_stories=stories)
+        gate = [{"feature_key": f["key"], "status": "PASS"}]
+        roster = _roster(("alice@example.com", "Alice", 8))
+        ok = run_timeline_check([f], gate, roster, 3)
+        # 16 SP ÷ 8/sprint = 2 sprints needed; 3 raw sprints left → OK.
+        assert ok[0]["risk"] == "OK"
+        high = run_timeline_check([f], gate, roster, 3, effective_sprints=1.3)
+        # Same 2 sprints needed, but only 1.3 effective sprints available → HIGH.
+        assert high[0]["risk"] == "HIGH"
+        assert high[0]["sprints_left"] == 1.3
+
+    def test_effective_sprints_defaults_to_remaining(self):
+        # Omitting effective_sprints reports the raw remaining sprints unchanged.
+        stories = [_story("S-1", "alice@example.com", sp=8)]
+        f = _feature(all_stories=stories)
+        gate = [{"feature_key": f["key"], "status": "PASS"}]
+        roster = _roster(("alice@example.com", "Alice", 8))
+        result = run_timeline_check([f], gate, roster, 3)
+        assert result[0]["sprints_left"] == 3
+
+    def test_velocity_factor_scales_throughput(self):
+        # One sole contributor on a feature: velocity == sp_target × velocity_factor.
+        stories = [_story("S-1", "alice@example.com", sp=8)]
+        f = _feature(all_stories=stories)
+        gate = [{"feature_key": f["key"], "status": "PASS"}]
+        roster = _roster(("alice@example.com", "Alice", 8))
+        full = run_timeline_check([f], gate, roster, 3)
+        half = run_timeline_check([f], gate, roster, 3, velocity_factor=0.5)
+        # Full pace: 8 SP ÷ (8 × 1.0) = 1 sprint. Half pace halves velocity, doubles sprints.
+        assert full[0]["velocity_per_sprint"] == 8.0
+        assert full[0]["sprints_needed"] == 1.0
+        assert half[0]["velocity_per_sprint"] == 4.0
+        assert half[0]["sprints_needed"] == 2.0
+
+    def test_roster_member_without_sp_target_defaults_to_guideline(self):
+        # A roster member missing the sp_target field must fall back to the single
+        # DEFAULT_SP_TARGET guideline (decision 0015), not zero. Otherwise dropping
+        # sp_target from every member — to lean on the single soft guideline —
+        # would zero each member's throughput and flag every feature NO_CONTRIBUTORS.
+        roster = {"members": [{"username": "alice@example.com", "display_name": "Alice"}]}
+        stories = [_story("S-1", "alice@example.com", sp=8)]
+        f = _feature(all_stories=stories)
+        gate = [{"feature_key": f["key"], "status": "PASS"}]
+        result = run_timeline_check([f], gate, roster, 1)
+        assert result[0]["risk"] != "NO_CONTRIBUTORS"
+        assert result[0]["velocity_per_sprint"] == 8.0
+        assert result[0]["risk"] == "OK"
+
+    def test_non_roster_contributor_still_zero_velocity(self):
+        # The fix must not credit non-roster people: with a roster present, an
+        # assignee who is not a member still contributes zero (→ NO_CONTRIBUTORS).
+        roster = {"members": [{"username": "alice@example.com", "display_name": "Alice"}]}
+        stories = [_story("S-1", "stranger@example.com", sp=8)]
+        f = _feature(all_stories=stories)
+        gate = [{"feature_key": f["key"], "status": "PASS"}]
+        result = run_timeline_check([f], gate, roster, 1)
+        assert result[0]["risk"] == "NO_CONTRIBUTORS"
+
+
+class TestVelocityScalingFactor(unittest.TestCase):
+    def test_none_velocity_is_identity(self):
+        roster = _roster(("alice@example.com", "Alice", 8), ("bob@x.com", "Bob", 8))
+        assert velocity_scaling_factor(None, roster) == 1.0
+
+    def test_scales_to_measured_velocity(self):
+        # Σ sp_target = 16; velocity 8 → factor 0.5.
+        roster = _roster(("alice@example.com", "Alice", 8), ("bob@x.com", "Bob", 8))
+        assert velocity_scaling_factor(8, roster) == 0.5
+
+    def test_empty_roster_is_identity(self):
+        assert velocity_scaling_factor(20, _roster()) == 1.0
+
 
 class TestAssignmentCheck(unittest.TestCase):
     def test_spof_detected(self):
@@ -210,27 +317,30 @@ class TestAssignmentCheck(unittest.TestCase):
         assert len(result["unassigned"]) == 1
         assert result["unassigned"][0]["count"] == 1
 
-    def test_bugs_excluded_from_spof(self):
+    def test_bugs_counted_for_spof(self):
+        # Bugs count as contributions like other work (edge-context decision 0003):
+        # a bug owned by a second person means the feature is no longer single-owner.
         stories = [
             _story("S-1", "alice@example.com", sp=5),
-            _story("B-1", "bot@x.com", sp=0, issue_type="Bug"),
+            _story("B-1", "bot@x.com", sp=3, issue_type="Bug"),
         ]
         f = _feature(all_stories=stories)
         result = run_assignment_check([f])
-        assert len(result["spof"]) == 1
+        assert len(result["spof"]) == 0
 
-    def test_bugs_excluded_from_unassigned(self):
-        stories = [_story("B-1", assignee=None, sp=0, issue_type="Bug")]
+    def test_bugs_counted_for_unassigned(self):
+        # Unassigned bugs are unassigned work like any other (edge-context decision 0003).
+        stories = [_story("B-1", assignee=None, sp=3, issue_type="Bug")]
         f = _feature(all_stories=stories)
         result = run_assignment_check([f])
-        assert len(result["unassigned"]) == 0
+        assert len(result["unassigned"]) == 1
 
 
 class TestCompositeCheck(unittest.TestCase):
     def _run(self, features, gate_status="PASS", timeline_risk="OK", capacity_over=False,
              has_spof=False, has_unassigned=False, has_sizing=False, count_sizing=False):
         gate = [{"feature_key": f["key"], "status": gate_status} for f in features]
-        capacity = [{"person": "alice@example.com", "status": "OVER"}] if capacity_over else []
+        capacity = [{"person": "alice@example.com", "status": "ABOVE_GUIDELINE"}] if capacity_over else []
         timeline = [{"feature_key": f["key"], "risk": timeline_risk} for f in features]
         spof = [{"feature_key": feat["key"], "sole_contributor": "alice"} for feat in features] if has_spof else []
         unassigned_list = [{"feature_key": feat["key"], "count": 1, "sp": 5} for feat in features] if has_unassigned else []
@@ -245,14 +355,25 @@ class TestCompositeCheck(unittest.TestCase):
         assert result[0]["composite_risk"] == "LOW"
 
     def test_medium_two_signals(self):
+        # Two counted signals = MEDIUM (capacity is not among the counted signals).
         f = _feature(all_stories=[_story()])
-        result = self._run([f], has_spof=True, capacity_over=True)
+        result = self._run([f], timeline_risk="HIGH", has_spof=True)
         assert result[0]["composite_risk"] == "MEDIUM"
 
     def test_high_three_signals(self):
+        # timeline + assignment + data-quality FAIL = 3 counted signals = HIGH.
         f = _feature(all_stories=[_story()])
-        result = self._run([f], timeline_risk="HIGH", has_spof=True, capacity_over=True)
+        result = self._run([f], gate_status="FAIL", timeline_risk="HIGH", has_spof=True)
         assert result[0]["composite_risk"] == "HIGH"
+
+    def test_capacity_not_counted_but_shown(self):
+        # A contributor above the guideline is shown on the row but adds no signal:
+        # one spof signal alone stays LOW even with capacity flagged (must-fix item 3).
+        f = _feature(all_stories=[_story()])
+        result = self._run([f], has_spof=True, capacity_over=True)
+        assert result[0]["capacity"] == "ABOVE_GUIDELINE"
+        assert result[0]["signal_count"] == 1
+        assert result[0]["composite_risk"] == "LOW"
 
     def test_sizing_shown_but_not_counted_by_default(self):
         f = _feature(all_stories=[_story()])
@@ -278,11 +399,28 @@ class TestCompositeCheck(unittest.TestCase):
         assert result[0]["signal_count"] == 2
         assert result[0]["composite_risk"] == "MEDIUM"
 
+    def test_bug_assignee_capacity_shown_not_counted(self):
+        # edge-context decision 0003: bugs are team work, so a bug assignee who is
+        # above the guideline shows on the feature's capacity cell — but per must-fix
+        # item 3 that is informational and adds no composite signal. A legacy "OVER"
+        # status is still read (readers accept both OVER and ABOVE_GUIDELINE).
+        bug = _story("B-1", assignee="alice@example.com", sp=3, issue_type="Bug")
+        f = _feature(all_stories=[bug])
+        gate = [{"feature_key": f["key"], "status": "PASS"}]
+        capacity = [{"person": "alice@example.com", "status": "OVER"}]
+        timeline = [{"feature_key": f["key"], "risk": "OK"}]
+        assignment = {"spof": [], "unassigned": []}
+        result = run_composite_check([f], gate, capacity, timeline, assignment, [])
+        assert result[0]["capacity"] == "ABOVE_GUIDELINE"
+        assert result[0]["signal_count"] == 0
+        assert result[0]["composite_risk"] == "LOW"
+
     def test_sorted_high_first(self):
+        # F-2 carries three counted signals (data-quality + timeline + assignment);
+        # capacity and sizing are shown but not counted, so they don't alter the sort.
         f1 = _feature("F-1", all_stories=[_story("S-1")])
         f2 = _feature("F-2", all_stories=[_story("S-2")])
-        gate = [{"feature_key": "F-1", "status": "PASS"}, {"feature_key": "F-2", "status": "PASS"}]
-        capacity = []
+        gate = [{"feature_key": "F-1", "status": "PASS"}, {"feature_key": "F-2", "status": "FAIL"}]
         timeline = [{"feature_key": "F-1", "risk": "OK"}, {"feature_key": "F-2", "risk": "HIGH"}]
         assignment = {"spof": [{"feature_key": "F-2", "sole_contributor": "a"}],
                       "unassigned": [{"feature_key": "F-2", "count": 1, "sp": 0}]}
@@ -474,6 +612,189 @@ class TestCompositeCheckBugSignal(unittest.TestCase):
             {"spof": [], "unassigned": []}, []
         )
         assert result[0]["bugs"] == "OK"
+
+
+class TestTeamCapacity(unittest.TestCase):
+    def test_velocity_basis_preferred(self):
+        # Capacity is planned against measured velocity (edge-context decision 0015).
+        roster = _roster(("alice@example.com", "Alice", 8), ("bob@example.com", "Bob", 8))
+        cap, basis = team_capacity(20.0, roster, 3)
+        assert basis == "velocity"
+        assert cap == 60
+
+    def test_velocity_rounds_to_nearest_sp(self):
+        roster = _roster(("alice@example.com", "Alice", 8))
+        cap, basis = team_capacity(12.5, roster, 2)
+        assert basis == "velocity"
+        assert cap == 25
+
+    def test_roster_fallback_when_no_velocity(self):
+        # No velocity available → Σ sp_target × sprints left, flagged as fallback.
+        roster = _roster(("alice@example.com", "Alice", 8), ("bob@example.com", "Bob", 5))
+        cap, basis = team_capacity(None, roster, 2)
+        assert basis == "roster_fallback"
+        assert cap == 26
+
+    def test_roster_fallback_uses_default_target(self):
+        roster = {"members": [{"username": "alice@example.com", "display_name": "Alice"}]}
+        cap, basis = team_capacity(None, roster, 1)
+        assert basis == "roster_fallback"
+        assert cap == _mod.DEFAULT_SP_TARGET
+
+    def test_availability_reduces_velocity_capacity(self):
+        # law 09: velocity adjusted for PTO. Two sprints at 80% and 50% → 1.3 effective.
+        roster = _roster(("alice@example.com", "Alice", 8))
+        cap, basis = team_capacity(20.0, roster, 2, availability=[0.8, 0.5])
+        assert basis == "velocity"
+        assert cap == 26  # round(20 * 1.3)
+
+    def test_full_availability_matches_unadjusted(self):
+        roster = _roster(("alice@example.com", "Alice", 8))
+        assert team_capacity(20.0, roster, 3, availability=[1.0, 1.0, 1.0])[0] == 60
+        assert team_capacity(20.0, roster, 3)[0] == 60
+
+    def test_availability_applies_to_roster_fallback(self):
+        roster = _roster(("alice@example.com", "Alice", 8), ("bob@example.com", "Bob", 5))
+        cap, basis = team_capacity(None, roster, 2, availability=[1.0, 0.5])
+        assert basis == "roster_fallback"
+        assert cap == 20  # round(13 * 1.5)
+
+
+class TestParseAvailability(unittest.TestCase):
+    def test_none_yields_full_availability(self):
+        assert parse_availability(None, 3) == [1.0, 1.0, 1.0]
+
+    def test_clamps_to_unit_interval(self):
+        assert parse_availability("1.5,-0.2", 2) == [1.0, 0.0]
+
+    def test_pads_short_list_with_full(self):
+        assert parse_availability("0.5", 3) == [0.5, 1.0, 1.0]
+
+    def test_truncates_long_list(self):
+        assert parse_availability("0.5,0.6,0.7", 2) == [0.5, 0.6]
+
+    def test_invalid_token_not_echoed_to_log(self):
+        # --availability is caller-controlled; a bad token must be skipped
+        # without echoing its raw value (it could carry sensitive data).
+        secret = "user@example.com:hunter2"
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            result = parse_availability(f"0.5,{secret}", 2)
+        log = buf.getvalue()
+        assert result == [0.5, 1.0]  # bad token treated as 1.0 in place
+        assert secret not in log
+        assert "position 2" in log
+
+    def test_empty_token_kept_in_place_as_full(self):
+        # An empty value must become 1.0 *in place*, not be dropped — dropping would
+        # shift later sprints' availability onto the wrong sprint (should-fix item 7).
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            result = parse_availability("0.5,,0.2", 3)
+        assert result == [0.5, 1.0, 0.2]
+        assert "position 2" in buf.getvalue()
+
+    def test_non_numeric_token_kept_in_place_as_full(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            result = parse_availability("0.5,oops,0.2", 3)
+        assert result == [0.5, 1.0, 0.2]
+
+
+class TestHiddenScope(unittest.TestCase):
+    def _active(self, stories):
+        f = _feature(all_stories=stories)
+        return [f], {f["key"]}
+
+    def test_bugs_excluded_from_estimate(self):
+        # Unpointed open bugs must not inflate the hidden-scope estimate.
+        stories = [
+            _story("S-1", sp=0, status="To Do"),
+            _story("B-1", sp=0, status="To Do", issue_type="Bug"),
+            _story("B-2", sp=0, status="To Do", issue_type="Bug"),
+        ]
+        features, active_keys = self._active(stories)
+        hidden = estimate_hidden_scope(features, active_keys)
+        assert hidden["unpointed_open"] == 1  # only the story
+        assert hidden["unpointed_bugs"] == 2
+        assert set(hidden["unpointed_bug_keys"]) == {"B-1", "B-2"}
+
+    def test_no_bugs_leaves_estimate_unchanged(self):
+        stories = [_story("S-1", sp=0, status="To Do"), _story("S-2", sp=0, status="To Do")]
+        features, active_keys = self._active(stories)
+        hidden = estimate_hidden_scope(features, active_keys)
+        assert hidden["unpointed_open"] == 2
+        assert hidden["unpointed_bugs"] == 0
+        assert hidden["unpointed_bug_keys"] == []
+
+
+class TestLoadVelocity(unittest.TestCase):
+    def test_missing_path_returns_fallback(self):
+        vel, sprints = load_velocity("/nonexistent/velocity.json")
+        assert vel is None
+        assert sprints == []
+
+    def test_none_path_returns_fallback(self):
+        assert load_velocity(None) == (None, [])
+
+    def test_loads_existing_file(self):
+        import json
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"team_velocity": 18.0, "sprints": [{"sprint_id": 1}]}, fh)
+            path = fh.name
+        try:
+            vel, sprints = load_velocity(path)
+            assert vel == 18.0
+            assert sprints == [{"sprint_id": 1}]
+        finally:
+            os.unlink(path)
+
+    def test_string_velocity_coerced_to_float(self):
+        # velocity.json normally carries a number, but a stringified value must be
+        # coerced rather than crash the planning run (should-fix item 7).
+        import json
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"team_velocity": "12.5", "sprints": []}, fh)
+            path = fh.name
+        try:
+            vel, _ = load_velocity(path)
+            assert vel == 12.5
+        finally:
+            os.unlink(path)
+
+    def test_non_numeric_velocity_ignored_with_warning(self):
+        import json
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"team_velocity": "n/a", "sprints": [{"sprint_id": 3}]}, fh)
+            path = fh.name
+        try:
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                vel, sprints = load_velocity(path)
+            assert vel is None
+            assert sprints == [{"sprint_id": 3}]
+            assert "not numeric" in buf.getvalue()
+        finally:
+            os.unlink(path)
+
+    def test_zero_velocity_coerced_to_fallback(self):
+        # A measured 0 (nothing matched the roster, e.g. live null-email assignees)
+        # is no usable signal: coerce to None so capacity uses the roster fallback,
+        # not a degenerate 0-SP capacity that flags everything at risk.
+        import json
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"team_velocity": 0.0, "sprints": [{"sprint_id": 5}]}, fh)
+            path = fh.name
+        try:
+            vel, sprints = load_velocity(path)
+            assert vel is None  # falls back to roster
+            assert sprints == [{"sprint_id": 5}]
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

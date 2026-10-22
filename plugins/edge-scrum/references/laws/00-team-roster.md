@@ -1,6 +1,8 @@
 # Edge Scrum Law: Team Roster
 
 > The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+>
+> **Canonical source:** edge-context [`people/team-roster.md`](https://github.com/openshift-eng/edge-context/blob/main/people/team-roster.md), [`about/workstreams.md`](https://github.com/openshift-eng/edge-context/blob/main/about/workstreams.md). If this file and edge-context disagree, edge-context is authoritative and this file must be updated.
 
 An issue belongs to the team if a roster member is the **assignee** or the **QA Contact** (`customfield_10470`). Exclude issues where neither field matches a roster member.
 

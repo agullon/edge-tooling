@@ -34,7 +34,24 @@ def transform_feature(raw, rank=None):
                     spike_candidates.append(
                         {
                             "key": inward.get("key"),
+                            "summary": (
+                                inward.get("summary")
+                                or get_nested(inward, "fields", "summary")
+                                or ""
+                            ),
+                            "assignee": extract_display_name(
+                                inward.get("assignee")
+                                or get_nested(inward, "fields", "assignee"),
+                                "",
+                            ),
                             "status": get_nested(inward, "status", "name") or "",
+                            "resolution": (
+                                get_nested(inward, "resolution", "name")
+                                or get_nested(inward, "fields", "resolution", "name")
+                                or (inward.get("resolution")
+                                    if isinstance(inward.get("resolution"), str) else "")
+                                or ""
+                            ),
                             "issuelinks": inward.get("issuelinks", []),
                         }
                     )

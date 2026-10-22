@@ -1,6 +1,8 @@
 # Edge Scrum Law: Features and Initiatives
 
 > The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+>
+> **Canonical source:** edge-context [`procedures/refining-features-and-initiatives.md`](https://github.com/openshift-eng/edge-context/blob/main/procedures/refining-features-and-initiatives.md), [`procedures/refinement-checklists/features-and-initiatives.md`](https://github.com/openshift-eng/edge-context/blob/main/procedures/refinement-checklists/features-and-initiatives.md). If this file and edge-context disagree, edge-context is authoritative and this file must be updated.
 
 ## Issue Types
 
@@ -27,7 +29,7 @@
 | Refinement | SME is investigating; refinement spike in progress |
 | Backlog | Refinement complete; epics created; ready to be worked |
 | In Progress | Active development underway |
-| Dev Complete | All implementation PRs merged |
+| Release Pending | Work complete; waiting for the release to ship |
 | Closed | Acceptance criteria met |
 
 Features in **New** state are **not a commitment** of work.

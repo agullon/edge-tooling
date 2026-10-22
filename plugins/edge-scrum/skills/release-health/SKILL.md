@@ -21,8 +21,9 @@ sprint_prefix: ["OCPEDGE Sprint", "OpenShift Edge Sprint"]
 
 # Custom Field IDs (Red Hat Jira instance-specific)
 fields:
-  story_points:  customfield_10028   # Numeric; Stories/Tasks/Spikes
-  epic_link:     customfield_10014   # Story → Epic relationship
+  story_points:  customfield_10028   # Numeric; Stories/Tasks/Spikes/Bugs (decision 0003)
+  parent:        parent              # Native issue → Epic link (Jira Cloud)
+  epic_link:     customfield_10014   # Legacy fallback for the native Parent field
   parent_link:   customfield_10018   # Epic → Feature/Initiative relationship
   qa_contact:    customfield_10470   # User picker; QA owner
   flagged:       customfield_10021   # Array; non-empty = impediment
@@ -158,7 +159,7 @@ Use the refinement-mode JQL when `REFINEMENT_MODE = true`.
 Paginate using `page_token`. If zero results, use fallback JQL (set `fallback_used`):
 
 ```jql
-project = OCPSTRAT AND issuetype in (Feature, Initiative) AND labels in ("ocpedge-plan", "microshift") AND "Target Version" = "openshift-{VERSION}" AND status not in (Done, Closed) ORDER BY Rank ASC
+project = OCPSTRAT AND issuetype in (Feature, Initiative) AND labels in ("ocpedge-plan", "microshift") AND "Target Version" = "openshift-{VERSION}" AND status not in (Done, Closed, "Release Pending") ORDER BY Rank ASC
 ```
 
 After all pages fetched, run:
@@ -209,14 +210,30 @@ Read `{WORKDIR}/sprints.json`. Extract `refinement_sprint_id`.
 Call `jira_search`:
 
 - **JQL:** `project in (OCPEDGE, USHIFT) AND issuetype = Spike AND sprint = {refinement_sprint_id}`
-- **Fields:** `key, summary, status, assignee, issuelinks`
+- **Fields:** `key, summary, status, assignee, resolution, issuelinks`
 - **limit:** `50`
 
-Paginate using `page_token`. After all pages fetched, run:
+Paginate using `page_token`; note the persisted refinement-sprint spike file paths.
+
+**Linked spikes (reachable only via a feature's issuelinks).** A feature may be blocked by a
+spike that is *not* in the refinement sprint; `transform-features.py` records these as
+`spike_candidates`, but the issuelink payload usually lacks the spike's assignee/status/resolution,
+so the test-plan vs refinement classification can't be made from it alone. Collect every
+`spike_candidates[].key` across `{WORKDIR}/features.json` that is **not** already among the
+refinement-sprint spikes just fetched. If any remain, fetch them by key with `jira_search`
+(batch in groups of 50):
+
+- **JQL:** `key in ({linked_spike_keys_csv})`
+- **Fields:** `key, summary, status, assignee, resolution, issuelinks`
+- **limit:** `50`
+
+Paginate using `page_token`; note the persisted linked-spike file paths. If there are none, skip
+this fetch and omit `--linked-spikes` below. Then run:
 
 ```bash
 python3 plugins/edge-scrum/bin/transform-spikes.py \
-  --input <all_persisted_file_paths> \
+  --input <refinement_sprint_spike_file_paths> \
+  --linked-spikes <linked_spike_file_paths> \
   --features-file {WORKDIR}/features.json \
   --epics-file {WORKDIR}/epics.json \
   --sprints-file {WORKDIR}/sprints.json \
@@ -226,6 +243,67 @@ python3 plugins/edge-scrum/bin/transform-spikes.py \
 #### 3c — Verify
 
 Read `{WORKDIR}/epics.json` and verify: `epic_keys` is a non-empty array, `feature_to_epics` is an object, and `epics` is an array. If any check fails, warn the user with a descriptive error and stop.
+
+#### 3d — Team Velocity (optional)
+
+Capacity is planned against the team's measured velocity — the average completed SP over the last 3 closed sprints (edge-context decision 0015) — not the roster's `sp_target` sum. This is the same velocity step as release-planning. If it is impractical or returns nothing, **skip it**: the analyzer falls back to the roster sum (`Σ sp_target × remaining sprints`) and labels the capacity line as a fallback.
+
+Write this run's velocity files to a fresh, uniquely named directory created with `mktemp -d`. Because the directory is new each run (a random suffix, no predictable path), there are no stale files for a glob to pick up and nothing to delete:
+
+```bash
+VELOCITY_DIR=$(mktemp -d "{WORKDIR}/velocity.XXXXXX") && echo "$VELOCITY_DIR"
+```
+
+Record `VELOCITY_DIR` and substitute it for `{VELOCITY_DIR}` below. It sits inside `{WORKDIR}`, so the end-of-run cleanup removes it with the rest of the run directory.
+
+1. Build a full (unfiltered) closed-sprint map. Phase 2a's `sprints.json` was transformed **with** `--first-sprint`/`--last-sprint`, so its `sprint_map` holds only the release-window sprints — the recent closed sprints velocity needs sit *before* `FIRST` and are not in it. Re-run `transform-sprints.py` on the **same** `state="closed"` raw pages already persisted in Phase 2a, this time with **no** `--first-sprint`/`--last-sprint` (so `sprint_map` holds every closed sprint) and `--today {TODAY}`, writing `{WORKDIR}/closed_sprints.json`:
+
+   ```bash
+   python3 plugins/edge-scrum/bin/transform-sprints.py \
+     --input <closed_sprint_raw_file_paths_from_phase_2a> \
+     --output {WORKDIR}/closed_sprints.json \
+     --today {TODAY}
+   ```
+
+   From that `sprint_map`, pick the three `closed` sprints with the highest `num` (the three most recently closed sprints — do **not** filter by `< FIRST`; an early sprint of the current release that has already closed is a valid velocity input). Record each one's `id`, `num`, and (if available) `start`/`end` (the sprint_map date keys). Collect the exact file path you write for each sprint in step 2 into a list `{VELOCITY_FILES}`.
+2. For each of those sprint IDs, call `jira_search`:
+   - **JQL:** `project in (OCPEDGE, USHIFT, OCPBUGS) AND sprint = {SPRINT_ID}`
+   - **Fields:** `key, summary, status, issuetype, assignee, resolutiondate, customfield_10028, customfield_10470, customfield_10020`
+   - **limit:** `50`, paginate with `page_token`.
+
+   Write the sprint metadata to a file with the `Write` tool (never interpolate the Jira sprint name into a shell command — it is attacker-influenced text):
+
+   `{VELOCITY_DIR}/velocity_s{NUM}.meta.json` =
+   `{"sprint_id": {SPRINT_ID}, "sprint_name": <SPRINT_NAME as a JSON-escaped string>, "sprint_start": <"YYYY-MM-DD" or null>, "sprint_end": <"YYYY-MM-DD" or null>}`
+
+   JSON-encode `SPRINT_NAME` (a name containing `"` or `\` breaks the file otherwise) and use the bare JSON literal `null` for a missing date, never the string `"null"` (which `compute-velocity.py` would treat as a real date). Read the metadata file back and confirm it parses as JSON before running the transform; if it does not, skip this sprint's velocity contribution.
+
+   Then run (pass the metadata file, not `--sprint-name`):
+
+   ```bash
+   python3 plugins/edge-scrum/bin/transform-sprint-issues.py \
+     --input <all_persisted_file_paths> \
+     --output {VELOCITY_DIR}/velocity_s{NUM}.json \
+     --sprint-meta {VELOCITY_DIR}/velocity_s{NUM}.meta.json \
+     --today {TODAY}
+   ```
+
+3. Compute velocity from the (up to) three sprint files. Pass the **exact** files you wrote in `{VELOCITY_FILES}` (space-separated, each under `{VELOCITY_DIR}`), never a `velocity_s*.json` glob:
+
+   ```bash
+   python3 plugins/edge-scrum/bin/compute-velocity.py \
+     --sprint-issues {VELOCITY_FILES} \
+     --roster plugins/edge-scrum/.roster.json \
+     --output {VELOCITY_DIR}/velocity.json
+   ```
+
+   Velocity counts completed SP of **team-owned** issues (assignee or QA Contact on the roster, per law 00); bugs count like other work (decision 0003). A done issue is credited only to the sprint it finished in — the sprint with the latest end date among the sprints it belonged to (falling back to the highest sprint id, then its resolution date, when end dates are missing; Jira does not return the list in reliable order) — so an issue carried across sprints is not double-counted.
+
+#### 3e — Team availability (optional, PTO/holidays)
+
+Law 09 plans capacity against velocity "adjusted for PTO and holidays". This is the same optional input as release-planning. Ask the user (via `AskUserQuestion`) whether any known PTO or company holidays fall in the remaining sprints. If they give you people-days away, convert to a per-sprint availability fraction for each remaining sprint: `availability_i = 1 − (people-days away in sprint i ÷ (roster size × working days in sprint i))`, clamped to `[0, 1]`. Record the resulting CSV as `{AVAILABILITY}` (one fraction per remaining sprint).
+
+If the run is non-interactive, or the user skips or has nothing to report, leave `{AVAILABILITY}` **empty**. When it is empty the analysis uses the full `remaining_sprint_count` and the report must state the capacity is **not adjusted for PTO**.
 
 ---
 
@@ -253,7 +331,7 @@ For `jira_get_sprints_from_board`: closed sprints may require multiple pages. Ac
 
 ### Phase 4: Full Analysis (sub-agent)
 
-Read `plugins/edge-scrum/skills/release-health-analysis/SKILL.md`. Substitute `{WORKDIR}`, `{VERSION}`, `{TODAY}`, `{REFINEMENT_SPRINT_NUM}`, `{REFINEMENT_MODE}`, then spawn as a sub-agent:
+Read `plugins/edge-scrum/skills/release-health-analysis/SKILL.md`. Substitute `{WORKDIR}`, `{VELOCITY_DIR}` (from step 3d, or empty if that step was skipped — the analyzer then uses the roster fallback), `{VERSION}`, `{TODAY}`, `{REFINEMENT_SPRINT_NUM}`, `{REFINEMENT_MODE}`, `{AVAILABILITY}` (the CSV from step 3e, or empty if not given), then spawn as a sub-agent:
 
 - **Agent 4** — prompt: analysis content with all placeholders substituted
 

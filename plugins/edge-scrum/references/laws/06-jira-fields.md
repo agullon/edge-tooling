@@ -1,13 +1,16 @@
 # Edge Scrum Law: Jira Custom Fields
 
 > The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+>
+> **Canonical source:** this file. Field IDs are specific to the Red Hat Jira instance and are maintained here.
 
 ## Custom Fields (Red Hat Jira Instance)
 
 | Field | Custom Field ID | Type | Usage |
 |---|---|---|---|
-| Story Points | `customfield_10028` | Numeric | SP value for Stories, Tasks, Spikes |
-| Epic Link | `customfield_10014` | Issue link | Story → Epic relationship |
+| Story Points | `customfield_10028` | Numeric | SP value for Stories, Tasks, Spikes, Bugs (edge-context decision 0003) |
+| Parent | `parent` (native) | Issue link | Story/Spike/Task/Bug → Epic on Jira Cloud; Epic Link `customfield_10014` is the legacy fallback |
+| Epic Link | `customfield_10014` | Issue link | Legacy Story → Epic relationship (fallback for the native Parent field) |
 | Parent Link | `customfield_10018` | Issue link | Epic → Feature/Initiative relationship |
 | QA Contact | `customfield_10470` | User picker | QA owner for an issue |
 | Flagged | `customfield_10021` | Array | Non-empty = impediment flag |

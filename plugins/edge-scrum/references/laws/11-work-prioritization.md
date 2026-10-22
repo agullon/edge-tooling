@@ -1,6 +1,8 @@
 # Edge Scrum Law: Work Prioritization
 
 > The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+>
+> **Canonical source:** edge-context [`procedures/work-prioritization.md`](https://github.com/openshift-eng/edge-context/blob/main/procedures/work-prioritization.md). If this file and edge-context disagree, edge-context is authoritative and this file must be updated.
 
 Prioritization flows top-down: Features/Initiatives → Epics → Scrum Backlog.
 

@@ -50,6 +50,7 @@ Refinement-only mode — checks whether Features in Refinement status are fully 
 - Schedule risk (completion % vs. expected % given sprints elapsed)
 - Staffing gaps (no DRI, no QA contact)
 - Refinement gaps (no AC, no sizing, no stories under an Epic)
+- Spike gaps — a missing or unclosed **refinement spike**, and separately a missing or unclosed **test plan spike** owned by the QE Lead (law 12; skipped when the Feature's QA Contact is `unassigned_jira`)
 - Blocked work (flagged, blocked-by links, Blocked/Parked labels, stale issues)
 - Capacity risk (total remaining SP vs. team velocity × remaining sprints)
 
@@ -78,7 +79,7 @@ Checks whether Features in Refinement status are fully broken down (Feature → 
 
 > Alice, OCPSTRAT-2607 Bandwidth Reduction has 2 issues: no size set on the feature, and Epic 'CLI Monitoring' has no stories underneath. The 'Staging Mechanism' epic is fine — 5 stories, all sized.
 
-Features with zero gaps are omitted. Features without an SME are grouped under "Unassigned SME" with a PM action callout. All levels are checked regardless of gaps found above — a feature missing an SME still gets its Epics and Stories checked.
+Features with zero gaps are omitted. Features without an SME are grouped under "Unassigned SME" with a PM action callout. All levels are checked regardless of gaps found above — a feature missing an SME still gets its Epics and Stories checked. Test plan spike gaps are listed under the SME group with the QE Lead named as owner.
 
 ## Configuration
 

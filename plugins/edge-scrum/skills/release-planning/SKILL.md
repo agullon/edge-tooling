@@ -10,9 +10,9 @@ argument-hint: "<version> <sprint-range> bc:<branch-cut> [pd:<pencils-down>] [--
 
 You are orchestrating a release planning risk assessment for the OCPEDGE team. Data fetching runs inline using MCP tools and transform scripts. Checks are deterministic (`run-checks.py`); only the narrative is delegated to a sub-agent.
 
-The report is decision-oriented: verdict → decisions → cut line → people over target → dormant scope → process gaps → how the numbers were computed → appendix. Every figure is computed in `run-checks.py` and its formula is recorded in `checks.json` (`method` block) so the report can show how each conclusion was reached. The full method is in `plugins/edge-scrum/references/release-planning-method.md`.
+The report is decision-oriented: verdict → decisions → cut line → people far above the soft guideline → dormant scope → process gaps → how the numbers were computed → appendix. Every figure is computed in `run-checks.py` and its formula is recorded in `checks.json` (`method` block) so the report can show how each conclusion was reached. The full method is in `plugins/edge-scrum/references/release-planning-method.md`.
 
-**Scope handling (new):** features in `New` status with no evidence of work (no epics, no stories, or no story in progress / done / in a release sprint / updated in the last 30 days) are classified **dormant** and pulled out of the risk math — they are a scope decision for PM, not a risk. Epics that are `Dev Complete`/`Closed` or target another release are excluded from scope and listed in the report. Capacity counts every roster member; assignees missing from the roster are flagged as roster drift.
+**Scope handling (new):** features in `New` status with no evidence of work (no epics, no stories, or no story in progress / done / in a release sprint / updated in the last 30 days) are classified **dormant** and pulled out of the risk math — they are a scope decision for PM, not a risk. Epics that are already done (`Dev Complete`/`Testing`/`Release Pending`/`Closed`, per law 07) or that target another release are excluded from scope and listed in the report. Capacity counts every roster member; assignees missing from the roster are flagged as roster drift.
 
 > **Before proceeding**: Read `plugins/edge-scrum/references/Edge-Scrum-Laws.md` to find which law files apply to release planning orchestration. For this skill, load: `laws/00-team-roster.md`, `laws/01-jira-projects.md`, `laws/03-jira-bugs.md`, `laws/04-jira-epics.md`, `laws/05-jira-features.md`, `laws/06-jira-fields.md`, `laws/09-sprint-policies.md`, `laws/14-agent-conventions.md`. The configuration below is derived from the Laws — when in doubt, defer to the law files.
 
@@ -26,8 +26,9 @@ sprint_prefix: ["OCPEDGE Sprint", "OpenShift Edge Sprint"]
 
 # Custom Field IDs (Red Hat Jira instance-specific)
 fields:
-  story_points:  customfield_10028   # Numeric; Stories/Tasks/Spikes
-  epic_link:     customfield_10014   # Story → Epic relationship
+  story_points:  customfield_10028   # Numeric; Stories/Tasks/Spikes/Bugs (decision 0003)
+  parent:        parent              # Native issue → Epic link (Jira Cloud)
+  epic_link:     customfield_10014   # Legacy fallback for the native Parent field
   parent_link:   customfield_10018   # Epic → Feature/Initiative relationship
   qa_contact:    customfield_10470   # User picker; QA owner
   flagged:       customfield_10021   # Array; non-empty = impediment
@@ -159,13 +160,13 @@ Call `jira_get_sprints_from_board` for board_id `"11479"` twice:
 - `state="active"`
 - `state="future"`
 
-Do **not** fetch `state="closed"`. The planning pipeline never reads closed-sprint data:
-`run-checks.py` takes `--remaining-sprints` as a number, and every sprint-derived figure
-(`remaining_sprint_count`, the active/dormant release-window check) is computed from active +
-future sprints or from sprint numbers on the stories themselves. The board returns closed
-sprints oldest-first across the full history (hundreds of sprints, many pages), so fetching
-them costs a large amount of context for no effect on the report. (Release-health, which does
-use closed sprints for its refinement checks, keeps its own closed-sprint fetch.)
+Do **not** fetch `state="closed"` here. `run-checks.py` takes `--remaining-sprints` as a
+number, and every sprint-derived figure in this phase (`remaining_sprint_count`, the
+active/dormant release-window check) is computed from active + future sprints or from sprint
+numbers on the stories themselves. The board returns closed sprints oldest-first across the
+full history (hundreds of sprints, many pages), so pulling them all into this phase costs a
+large amount of context. The velocity computation **does** need the most recent closed
+sprints, so it fetches them on its own in Phase 4d (`closed_sprints.json`) rather than here.
 
 After both calls, note all persisted file paths and run:
 
@@ -192,7 +193,7 @@ Keep the pages in fetch order: the JQL sorts by Rank and `transform-features.py`
 Paginate using `page_token`. If zero results, use fallback JQL (set `fallback_used`):
 
 ```jql
-project = OCPSTRAT AND issuetype in (Feature, Initiative) AND labels in ("ocpedge-plan", "microshift") AND "Target Version" = "openshift-{VERSION}" AND status not in (Done, Closed) ORDER BY Rank ASC
+project = OCPSTRAT AND issuetype in (Feature, Initiative) AND labels in ("ocpedge-plan", "microshift") AND "Target Version" = "openshift-{VERSION}" AND status not in (Done, Closed, "Release Pending") ORDER BY Rank ASC
 ```
 
 After all pages fetched, run:
@@ -291,6 +292,57 @@ python3 plugins/edge-scrum/bin/transform-bugs.py \
 
 Read `{WORKDIR}/stories.json` and `{WORKDIR}/bugs.json`. Verify they parse correctly and contain expected top-level keys (`total_stories`, `stories`, `total_bugs`, `bugs`). An empty stories or bugs list is valid (not an error).
 
+#### 4d — Team Velocity (optional)
+
+Capacity is planned against the team's measured velocity — the average completed SP over the last 3 closed sprints (edge-context decision 0015). This is the **one** planning consumer of closed-sprint data; fetch only the three most recent closed sprints, and if that is impractical or returns nothing, **skip this step** — `run-checks.py` falls back to the roster sum (`Σ sp_target × sprints left`) and the report states that the fallback was used.
+
+Write this run's velocity files to a fresh, uniquely named directory created with `mktemp -d`. Because the directory is new each run (a random suffix, no predictable path), there are no stale files for a glob to pick up and nothing to delete:
+
+```bash
+VELOCITY_DIR=$(mktemp -d "{WORKDIR}/velocity.XXXXXX") && echo "$VELOCITY_DIR"
+```
+
+Record `VELOCITY_DIR` and substitute it for `{VELOCITY_DIR}` below. It sits inside `{WORKDIR}`, so the end-of-run cleanup removes it with the rest of the run directory.
+
+1. Call `jira_get_sprints_from_board` for board_id `"11479"` with `state="closed"`, paginating (see pagination protocol). Transform with `transform-sprints.py` (no `--first-sprint`/`--last-sprint`, so `sprint_map` holds every sprint with its `id`, `num`, and `state`), writing `{WORKDIR}/closed_sprints.json`.
+2. From that `sprint_map`, pick the three `closed` sprints with the highest `num` (the three most recently closed sprints — all closed sprints precede the planning window, so no `< FIRST` filter is needed). Record their `id`, `num`, and (if available) `start`/`end` (the sprint_map date keys). Collect the exact file path you write for each sprint in step 3 into a list `{VELOCITY_FILES}`.
+3. For each of those sprint IDs, call `jira_search`:
+   - **JQL:** `project in (OCPEDGE, USHIFT, OCPBUGS) AND sprint = {SPRINT_ID}`
+   - **Fields:** `key, summary, status, issuetype, assignee, resolutiondate, customfield_10028, customfield_10470, customfield_10020`
+   - **limit:** `50`, paginate with `page_token`.
+
+   Write the sprint metadata to a file with the `Write` tool (never interpolate the Jira sprint name into a shell command — it is attacker-influenced text):
+
+   `{VELOCITY_DIR}/velocity_s{NUM}.meta.json` =
+   `{"sprint_id": {SPRINT_ID}, "sprint_name": <SPRINT_NAME as a JSON-escaped string>, "sprint_start": <"YYYY-MM-DD" or null>, "sprint_end": <"YYYY-MM-DD" or null>}`
+
+   JSON-encode `SPRINT_NAME` (a name containing `"` or `\` breaks the file otherwise) and use the bare JSON literal `null` for a missing date, never the string `"null"` (which `compute-velocity.py` would treat as a real date). Read the metadata file back and confirm it parses as JSON before running the transform; if it does not, skip this sprint's velocity contribution.
+
+   Then run (pass the metadata file, not `--sprint-name`):
+
+   ```bash
+   python3 plugins/edge-scrum/bin/transform-sprint-issues.py \
+     --input <all_persisted_file_paths> \
+     --output {VELOCITY_DIR}/velocity_s{NUM}.json \
+     --sprint-meta {VELOCITY_DIR}/velocity_s{NUM}.meta.json \
+     --today {TODAY}
+   ```
+
+4. Compute velocity from the (up to) three sprint files. Pass the **exact** files you wrote in `{VELOCITY_FILES}` (space-separated, each under `{VELOCITY_DIR}`), never a `velocity_s*.json` glob:
+
+   ```bash
+   python3 plugins/edge-scrum/bin/compute-velocity.py \
+     --sprint-issues {VELOCITY_FILES} \
+     --roster plugins/edge-scrum/.roster.json \
+     --output {VELOCITY_DIR}/velocity.json
+   ```
+
+   Velocity counts completed SP of **team-owned** issues (assignee or QA Contact on the roster, per law 00); bugs count like other work (decision 0003). A done issue is credited only to the sprint it finished in — the sprint with the latest end date among the sprints it belonged to (falling back to the highest sprint id, then its resolution date, when end dates are missing; Jira does not return the list in reliable order) — so an issue carried across sprints is not double-counted.
+
+#### 4e — Team availability (optional, PTO/holidays)
+
+Law 09 plans against velocity "adjusted for PTO and holidays". Ask the user (via `AskUserQuestion`) whether any known PTO or company holidays fall in the remaining sprints. If they give you people-days away, convert to a per-sprint availability fraction for each remaining sprint: `availability_i = 1 − (people-days away in sprint i ÷ (roster size × working days in sprint i))`, clamped to `[0, 1]`. Record the resulting CSV as `{AVAILABILITY}` (one fraction per remaining sprint) and pass it to `run-checks.py` via `--availability`. If the user skips or has nothing to report, omit `--availability`; capacity is then not adjusted for PTO and the report says so.
+
 ---
 
 ### Pagination Protocol
@@ -325,6 +377,8 @@ python3 plugins/edge-scrum/bin/run-checks.py \
   --bugs {WORKDIR}/bugs.json \
   --roster plugins/edge-scrum/.roster.json \
   --remaining-sprints {REMAINING_SPRINT_COUNT} \
+  --velocity-file {VELOCITY_DIR}/velocity.json \
+  --availability {AVAILABILITY} \
   --component-filter "{COMPONENT_FILTER}" \
   --version {VERSION} \
   --today {TODAY} \
@@ -334,6 +388,8 @@ python3 plugins/edge-scrum/bin/run-checks.py \
   --include-lower-when Refinement \
   --output {WORKDIR}/checks.json
 ```
+
+Include `--velocity-file` only if `{VELOCITY_DIR}/velocity.json` exists (Phase 4d ran and produced it). If Phase 4d was skipped, omit the flag; capacity then falls back to `Σ sp_target × sprints left` and `method.capacity` says so. (`run-checks.py` also tolerates a missing `--velocity-file` path, logging a warning and using the roster fallback, but prefer to omit the flag when there is no file.) Include `--availability` only if Phase 4e produced a value; otherwise omit it and capacity is not adjusted for PTO.
 
 Lower-priority features are excluded from all figures and listed in the appendix; adjust the two flags to widen or narrow focus.
 
@@ -385,7 +441,7 @@ Clean up: `test -n "{WORKDIR}" && [[ "{WORKDIR}" == /tmp/release-planning-* ]] &
 - **Feature in New with no evidence of work**: Classified dormant; listed under "Scope nobody has started" with the reason; excluded from all risk math.
 - **Active feature with no Epics**: Flagged by data-quality gate as FAIL — "no epics created."
 - **Active feature whose epics have no Stories**: Flagged by data-quality gate as FAIL — "epics have no stories."
-- **Epic that is Dev Complete/Closed or targets another release**: Excluded from scope; listed in the appendix with its open SP.
+- **Epic that is Dev Complete/Testing/Release Pending/Closed or targets another release**: Excluded from scope; listed in the appendix with its open SP.
 - **Assignee not in `.roster.json`**: Work counts as scope, capacity is zero; reported as roster drift and the user is asked before continuing.
 - **Component filter matches no features**: Warn user and exit cleanly — "No features found for component {COMPONENT_FILTER}."
 - **stories.json empty**: Data-quality gate flags all features as FAIL — no numeric projections possible.

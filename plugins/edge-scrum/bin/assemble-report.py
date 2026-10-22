@@ -3,7 +3,7 @@
 
 Layout (see references/release-planning-report-template.md):
 
-    verdict → decisions → cut line → people over target → dormant scope →
+    verdict → decisions → cut line → people above the soft guideline → dormant scope →
     process gaps → how the numbers are computed → collapsible appendix
 
 The report is rendered to Markdown from a block model built once from
@@ -139,7 +139,8 @@ def build_blocks(checks, recs, params):
         "rows": [[
             f"**{meta['total_remaining_sp']} SP**",
             f"{hidden.get('unpointed_open', 0)} stories unpointed ({hidden.get('unpointed_assigned', 0)} assigned)"
-            f" ≈ {hidden.get('estimate_low', 0)}–{hidden.get('estimate_high', 0)} SP",
+            f" ≈ {hidden.get('estimate_low', 0)}–{hidden.get('estimate_high', 0)} SP"
+            + (f"; {hidden.get('unpointed_bugs', 0)} unpointed bugs (excl.)" if hidden.get("unpointed_bugs") else ""),
             f"**{meta['total_capacity_sp']} SP**",
             f"**{gap:+d} SP** ({meta.get('gap_with_hidden_low', gap):+d} to {meta.get('gap_with_hidden_high', gap):+d} incl. hidden)",
         ]],
@@ -147,7 +148,7 @@ def build_blocks(checks, recs, params):
 
     blocks["STATS_LINE"] = [{"t": "small", "text": (
         f"{plural(meta['active_features'], 'active feature')} · {meta['dormant_features']} dormant · "
-        f"{plural(meta['overloaded_people_count'], 'person', 'people')} over target · "
+        f"{plural(meta['overloaded_people_count'], 'person', 'people')} far above the soft guideline · "
         f"{plural(meta['spof_features_count'], 'single-owner feature')} · "
         f"{meta['high_risk_count']} HIGH / {meta['medium_risk_count']} MEDIUM / {meta['low_risk_count']} LOW · "
         f"{meta.get('deprioritized_features', 0)} lower-priority not assessed"
@@ -194,9 +195,9 @@ def build_blocks(checks, recs, params):
                               "Rank comes from Jira; if the stack rank is stale, so is this table. Unpointed work is shown but not summed."},
     ]
 
-    # People over target
+    # People far above the soft guideline
     cap = checks.get("capacity", [])
-    over = [c for c in cap if c["status"] == "OVER"]
+    over = [c for c in cap if c["status"] in ("ABOVE_GUIDELINE", "OVER")]
     non_roster = [c for c in cap if not c["in_roster"] and (c["assigned_sp"] or c["unpointed_assigned"])]
     rows = []
     for c in over + non_roster:
@@ -217,7 +218,7 @@ def build_blocks(checks, recs, params):
         people_blocks.append({"t": "table", "headers": ["Person", "Assigned", "Capacity", "Unpointed", "Heaviest feature"],
                               "align": ["l", "r", "r", "r", "l"], "rows": rows})
     else:
-        people_blocks.append({"t": "p", "text": "*Nobody is over target.*"})
+        people_blocks.append({"t": "p", "text": "*Nobody is far above the soft guideline.*"})
     notes = []
     if hidden_heavy:
         notes.append(", ".join(f"{c['display_name']} ({c['unpointed_assigned']} unpointed)" for c in hidden_heavy)
@@ -266,6 +267,11 @@ def build_blocks(checks, recs, params):
     if pg.get("unpointed_open_stories"):
         items.append(f"**Just-in-time pointing** — {pg['unpointed_open_stories']} open stories unpointed "
                      f"({pg.get('unpointed_assigned_stories', 0)} already assigned); the {meta['total_remaining_sp']} SP figure is a floor.")
+    if meta.get("unpointed_bugs"):
+        bug_keys = meta.get("unpointed_bug_keys", [])
+        shown = ", ".join(bug_keys[:8]) + ("…" if len(bug_keys) > 8 else "")
+        items.append(f"**Unpointed bugs** — {meta['unpointed_bugs']} open bug(s) carry no story points "
+                     f"({shown}); excluded from the hidden-scope estimate, point them at refinement so they count toward scope.")
     ns = pg.get("features_without_sme", {})
     total_no_sme = len(ns.get("active", [])) + len(ns.get("dormant", []))
     if total_no_sme:
@@ -278,7 +284,7 @@ def build_blocks(checks, recs, params):
                      f"{verb} larger than {poss} T-shirt implies.")
     if pg.get("excluded_epics"):
         items.append(f"**Out-of-release work under {params['version']} features** — {plural(len(pg['excluded_epics']), 'epic')} ({pg.get('excluded_open_sp', 0)} open SP) "
-                     "are Dev Complete/Closed or target another release and were left out of the math.")
+                     "are Dev Complete/Testing/Release Pending/Closed or target another release and were left out of the math.")
     # Features whose only epics were excluded read as "no epics created" if left alone;
     # they are finished or mis-targeted, a distinct condition from un-refined scope.
     excluded_only = [d for d in checks.get("data_quality", []) if d.get("all_epics_excluded")]
@@ -294,9 +300,12 @@ def build_blocks(checks, recs, params):
 
     # Method
     rows = [[m["label"], m["formula"], m["shown_as"]] for m in checks.get("method", [])]
+    pto_adjusted = any(a < 1.0 for a in meta.get("availability", []) or [])
     limits = [
-        "timeline and capacity signals both depend on contributor load, so an overloaded person raises the risk of every feature they touch",
-        "capacity ignores PTO, holidays and bug-fix time — treat it as an upper bound",
+        "feature capacity risk is the velocity-based timeline check; a person being far above the soft guideline is shown for context but does not by itself raise a feature's composite risk",
+        ("capacity is adjusted for the PTO/holidays supplied for the remaining sprints, but still treats the sampled velocity as an upper bound"
+         if pto_adjusted else
+         "capacity is not adjusted for upcoming PTO/holidays (none supplied) — treat it as an upper bound"),
     ]
     blocks["METHOD"] = [
         {"t": "table", "headers": ["Figure", "Formula", "This run"], "align": ["l", "l", "l"], "rows": rows},

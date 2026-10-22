@@ -52,8 +52,15 @@ class TestTransformStory(unittest.TestCase):
         assert result["sp"] == 5
         assert result["epic_key"] == "OCPEDGE-10"
 
-    def test_bug_always_zero_sp(self):
+    def test_bug_sp_extracted(self):
+        # Bugs are pointed like other work (edge-context decision 0003).
         raw = _make_raw(issue_type="Bug", sp=8)
+        result = transform_story(raw, TODAY)
+        assert result["sp"] == 8
+        assert result["type"] == "Bug"
+
+    def test_bug_unpointed_defaults_to_zero(self):
+        raw = _make_raw(issue_type="Bug")
         result = transform_story(raw, TODAY)
         assert result["sp"] == 0
         assert result["type"] == "Bug"
@@ -150,13 +157,14 @@ class TestComputeAggregates(unittest.TestCase):
         agg = compute_aggregates(stories)
         assert "OCPBUGS-1" not in agg.get("unassigned_stories", [])
 
-    def test_sp_by_assignee_excludes_bugs(self):
+    def test_sp_by_assignee_includes_bugs(self):
+        # Bugs load a person like other pointed work (edge-context decision 0003).
         stories = [
             self._story("A-1", assignee="alice@redhat.com", sp=5),
-            self._story("A-2", assignee="alice@redhat.com", sp=0, issue_type="Bug"),
+            self._story("A-2", assignee="alice@redhat.com", sp=3, issue_type="Bug"),
         ]
         agg = compute_aggregates(stories)
-        assert agg["sp_by_assignee"]["alice@redhat.com"] == 5
+        assert agg["sp_by_assignee"]["alice@redhat.com"] == 8
 
     def test_sp_by_assignee_excludes_zero_sp(self):
         stories = [
@@ -173,7 +181,9 @@ class TestComputeAggregates(unittest.TestCase):
         agg = compute_aggregates(stories)
         assert agg["unassigned_stories"] == ["A-1"]
 
-    def test_unpointed_stories_exclude_bugs_and_done(self):
+    def test_unpointed_stories_include_bugs_exclude_done(self):
+        # Unpointed bugs count like unpointed stories (edge-context decision 0003);
+        # done issues are still excluded.
         stories = [
             self._story("A-1", sp=0, status="To Do"),
             self._story("A-2", sp=0, status="Closed"),
@@ -181,7 +191,7 @@ class TestComputeAggregates(unittest.TestCase):
             self._story("A-4", sp=5, status="To Do"),
         ]
         agg = compute_aggregates(stories)
-        assert agg["unpointed_stories"] == ["A-1"]
+        assert agg["unpointed_stories"] == ["A-1", "A-3"]
 
     def test_remaining_sp_by_epic(self):
         stories = [

@@ -1,6 +1,8 @@
 # Edge Scrum Law: Jira Projects
 
 > The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+>
+> **Canonical source:** edge-context [`procedures/jira-reference.md`](https://github.com/openshift-eng/edge-context/blob/main/procedures/jira-reference.md), [`about/workstreams.md`](https://github.com/openshift-eng/edge-context/blob/main/about/workstreams.md). If this file and edge-context disagree, edge-context is authoritative and this file must be updated.
 
 ## Projects
 
@@ -21,6 +23,8 @@ All team labels SHOULD use the `OCPEDGE:` namespace prefix.
 | `microshift` | Identifies OCPSTRAT issues as team-owned (MicroShift workstream). |
 | `edge` | General edge label. **Not sufficient alone** for team ownership — requires `ocpedge-plan` or `microshift` alongside it. |
 | `ocpedge` | Apply at Epic and Story level. **Only needed for work outside the OCPEDGE project.** |
+| `no_core_payload` | Work for a component that ships outside the OpenShift core payload (e.g. LVMS, MicroShift). Informs release-blocker handling and payload reporting. |
+| `4.x-candidate` / `5.x-candidate` | Apply to an Epic (matching its Target Version) when it has no parent Initiative/Feature or the parent spans multiple releases. |
 | `OCPEDGE:Docs` | Doc-specific tasks |
 | `OCPEDGE:QE` | QE-specific tasks |
 | `OCPEDGE:RHEL-Verification` | RHEL ticket verification tasks for TNF |

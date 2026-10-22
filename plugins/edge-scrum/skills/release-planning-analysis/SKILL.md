@@ -30,17 +30,17 @@ Substituted by the parent before spawning:
 
 Read `{WORKDIR}/checks.json`. Relevant keys:
 
-- `meta` — headline figures: `total_remaining_sp`, `total_capacity_sp`, `gap_sp`, hidden-scope range, active/dormant counts, risk counts, `overall_risk`
+- `meta` — headline figures: `total_remaining_sp`, `total_capacity_sp`, `gap_sp`, hidden-scope range, active/dormant counts, risk counts, `overall_risk`, plus `capacity_basis` (`velocity` or `roster_fallback`), `team_velocity` and `velocity_sprints`. Capacity is planned against team velocity (edge-context decision 0015); when `capacity_basis` is `roster_fallback`, say velocity was unavailable and the roster sum was used.
 - `method` — the formula, inputs and result behind every headline figure. Every number you write must be traceable to this block or to a table below
 - `cut_line` — active features in PM rank order with cumulative SP and `fits` (`fits` / `partial` / `over`)
-- `capacity` — per person: `assigned_sp`, `unpointed_assigned`, `remaining_capacity`, `status` (`OK` / `OVER` / `NOT_IN_ROSTER`)
+- `capacity` — per person: `assigned_sp`, `unpointed_assigned`, `remaining_capacity`, `status` (`OK` / `ABOVE_GUIDELINE` / `NOT_IN_ROSTER`). `ABOVE_GUIDELINE` means a person's assigned open SP is **far above their own `sp_target` soft guideline** (> 1.5 × sp_target × sprints left; decision 0015), not over a hard limit, and is **informational** — it does not add a composite risk signal. Team capacity is the velocity figure, not the sum of these per-person targets.
 - `timeline` — per feature: `remaining_sp`, `unpointed_open`, `velocity_per_sprint`, `sprints_needed`, `risk`
 - `assignment` — `spof` (single-owner features) and `unassigned`
 - `bug_load` — unassigned Blocker/Critical bugs
 - `sizing` — informational T-shirt mismatches (not part of composite risk)
 - `composite` — per-feature composite risk and its signals
 - `scope_confirmation` — dormant features (status New, no evidence of work) with the reason each was classified dormant
-- `hidden_scope` — unpointed story counts and the SP estimate range with its basis
+- `hidden_scope` — unpointed story counts and the SP estimate range with its basis. `unpointed_bugs` / `unpointed_bug_keys` are reported **separately** and are deliberately excluded from the estimate (no bugs carry points yet, so folding them in would inflate hidden scope). Surface unpointed bugs as a count/list to be pointed at refinement; do not add them to the hidden-scope SP figure.
 - `process_gaps` — computed systemic findings: `roster_drift`, `features_without_sme`, unpointed counts, `excluded_epics`
 - `feature_names` — key → summary, for naming features
 
@@ -70,7 +70,7 @@ Write `{WORKDIR}/recommendations.json`:
     "<appendix: one line per HIGH composite feature — what specifically to do>"
   ],
   "per_person": [
-    "<appendix: one line per person over target or sole owner — what to move or pair>"
+    "<appendix: one line per person far above their sp_target soft guideline or sole owner — what to move or pair>"
   ]
 }
 ```

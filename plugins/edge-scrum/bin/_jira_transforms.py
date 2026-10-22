@@ -11,9 +11,24 @@ from datetime import datetime, date, timedelta
 # --- Status Constants ---
 
 DONE_STATUSES_SPRINT = {"Done", "Closed", "Verified"}
+DONE_STATUSES_OCPBUGS = {"Closed", "Verified"}
 DONE_STATUSES_BLOCKER = {"Closed", "Verified", "Done", "Won't Fix"}
 IN_PROGRESS_STATUSES = {"In Progress", "Review"}
 KNOWN_ISSUE_TYPES = {"Story", "Bug", "Spike", "Task"}
+
+
+def is_sprint_done(issue):
+    """Done-state of a transformed sprint issue by law 07, per issue type/project.
+
+    OCPBUGS bugs are done at Verified or Closed; every other issue type (OCPEDGE /
+    USHIFT stories, tasks, spikes and bugs) is done only at Closed. This mirrors
+    ``run-checks.is_story_done`` so velocity and planning agree on what "done"
+    means — notably, a bare "Done" status does not count."""
+    status = issue.get("status") or get_nested(issue, "status", "name") or ""
+    key = issue.get("key") or ""
+    if key.startswith("OCPBUGS-"):
+        return status in DONE_STATUSES_OCPBUGS
+    return status == "Closed"
 
 
 # --- Field Extraction ---
@@ -46,11 +61,10 @@ def extract_issue_type(issue):
 
 
 def extract_sp(issue, issue_type=None):
-    """Extract story points. Bugs always return 0. Returns 0 on unparseable input."""
-    if issue_type is None:
-        issue_type = extract_issue_type(issue)
-    if issue_type == "Bug":
-        return 0
+    """Extract story points for any issue type, including Bugs (edge-context
+    decision 0003: all work is pointed). Returns 0 only when the field is unset
+    or unparseable. The ``issue_type`` argument is accepted for call-site
+    symmetry but no longer changes the result."""
     raw = issue.get("customfield_10028")
     if raw is None:
         return 0
@@ -70,8 +84,28 @@ def extract_sp(issue, issue_type=None):
         return 0
 
 
+def _parent_issue_type(parent):
+    """Issue-type name of a native 'parent' field, across MCP/REST shapes."""
+    return (
+        get_nested(parent, "issue_type", "name")
+        or get_nested(parent, "issuetype", "name")
+        or get_nested(parent, "fields", "issuetype", "name")
+    )
+
+
 def extract_epic_key(issue):
-    """Extract epic key from customfield_10014."""
+    """Extract the epic key for a child issue.
+
+    Jira Cloud links issues to their epic through the native ``parent`` field
+    (laws 02 and 06). Prefer it when the parent is an Epic; fall back to the
+    legacy Epic Link (``customfield_10014``) otherwise, so a non-Epic parent
+    (e.g. a sub-task's Story parent) does not shadow a real Epic Link and older
+    data without a native parent still resolves."""
+    parent = issue.get("parent")
+    if isinstance(parent, dict) and _parent_issue_type(parent) == "Epic":
+        key = parent.get("key")
+        if key:
+            return key
     raw = issue.get("customfield_10014")
     if raw is None:
         return "No Epic"
@@ -116,6 +150,22 @@ def extract_assignee_username(issue):
     return None
 
 
+def extract_user_username(field_value):
+    """Extract a user-picker field's identifier in roster username format (email).
+
+    Mirrors :func:`extract_assignee_username` for arbitrary user fields such as
+    QA Contact (``customfield_10470``). Returns ``None`` when unset or when the
+    identifier cannot be determined."""
+    if field_value is None:
+        return None
+    if isinstance(field_value, dict):
+        inner = field_value.get("value")
+        if isinstance(inner, dict):
+            field_value = inner
+        return field_value.get("email") or field_value.get("name")
+    return None
+
+
 def extract_display_name(field_value, fallback="None"):
     """Extract display name from a user picker field."""
     if field_value is None:
@@ -133,6 +183,57 @@ def extract_display_name(field_value, fallback="None"):
             or fallback
         )
     return str(field_value) if field_value else fallback
+
+
+# --- Roster matching ---
+
+
+def normalize_name(value):
+    """Lowercase, collapse internal whitespace and strip — for case- and
+    whitespace-insensitive matching of emails and display names."""
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip().casefold()
+
+
+def build_roster_index(roster):
+    """Index roster members by normalized username/email and display name.
+
+    Returns ``{"by_username": {...}, "by_display": {...}}`` mapping each
+    normalized key to the member dict, for use by :func:`roster_match`."""
+    by_username = {}
+    by_display = {}
+    for m in (roster or {}).get("members", []):
+        u = normalize_name(m.get("username"))
+        d = normalize_name(m.get("display_name"))
+        if u:
+            by_username[u] = m
+        if d:
+            by_display[d] = m
+    return {"by_username": by_username, "by_display": by_display}
+
+
+def roster_match(user_email, user_display_name, roster_or_index):
+    """Return the roster member matching by email/username or display name, else None.
+
+    Live Jira frequently returns users with ``email: null`` (display name only),
+    so matching on the email/username alone misses them. We match on either the
+    email/username **or** the display name, each compared case- and
+    whitespace-insensitively (:func:`normalize_name`). ``roster_or_index`` may be a
+    raw roster dict or a prebuilt :func:`build_roster_index` result (prefer the
+    latter in loops)."""
+    if (isinstance(roster_or_index, dict)
+            and "by_username" in roster_or_index and "by_display" in roster_or_index):
+        index = roster_or_index
+    else:
+        index = build_roster_index(roster_or_index)
+    e = normalize_name(user_email)
+    if e and e in index["by_username"]:
+        return index["by_username"][e]
+    d = normalize_name(user_display_name)
+    if d and d in index["by_display"]:
+        return index["by_display"][d]
+    return None
 
 
 def extract_blocked_by(issue, done_statuses=None):
@@ -187,9 +288,22 @@ _SPRINT_STR_RE = re.compile(r"id=(\d+).*?name=([^,\]]+)")
 
 
 def extract_sprints(raw):
-    """Normalize the Sprint field (customfield_10020) to [{id, name}]."""
+    """Normalize the Sprint field (customfield_10020) to [{id, name, end}].
+
+    ``end`` is the sprint's endDate (or completeDate when endDate is absent),
+    normalized to ``YYYY-MM-DD`` or ``None``. compute-velocity uses it to pick the
+    sprint an issue finished in by latest end date, falling back to the highest
+    sprint id when the dates are unavailable.
+    """
     if raw is None:
         return []
+    # This Jira/MCP wraps the sprint field as {"value": [<sprint>, ...]} (same as
+    # other custom fields). Unwrap it so each sprint dict is parsed individually,
+    # not treated as a single id-less sprint.
+    if isinstance(raw, dict) and "value" in raw:
+        raw = raw.get("value")
+        if raw is None:
+            return []
     if isinstance(raw, dict):
         raw = [raw]
     if isinstance(raw, str):
@@ -199,13 +313,15 @@ def extract_sprints(raw):
         if isinstance(item, dict):
             sid = item.get("id")
             name = item.get("name") or ""
-            out.append({"id": int(sid) if str(sid).isdigit() else sid, "name": name})
+            end = safe_format_date(item.get("endDate") or item.get("completeDate"), None)
+            out.append({"id": int(sid) if str(sid).isdigit() else sid,
+                        "name": name, "end": end})
         elif isinstance(item, str):
             m = _SPRINT_STR_RE.search(item)
             if m:
-                out.append({"id": int(m.group(1)), "name": m.group(2).strip()})
+                out.append({"id": int(m.group(1)), "name": m.group(2).strip(), "end": None})
             elif item:
-                out.append({"id": None, "name": item})
+                out.append({"id": None, "name": item, "end": None})
     return out
 
 

@@ -35,7 +35,7 @@ Spawned by the sprint-health skill during Phase 3 when mode = `retro`.
 - `{WORKDIR}/sprints.json` — sprint metadata (`target_sprint`)
 - `{WORKDIR}/sprint_issues.json` — all sprint issues with aggregates
 - `plugins/edge-scrum/references/laws/07-workflow-states.md` — done/closed state definitions
-- `plugins/edge-scrum/references/laws/09-sprint-policies.md` — churn rules (authoritative)
+- `plugins/edge-scrum/references/laws/09-sprint-policies.md` — capacity rules (authoritative)
 
 ## Instructions
 
@@ -45,7 +45,6 @@ Read all input files. Extract:
 
 - From `sprints.json → target_sprint`: `name`, `goal`, `start`, `end`
 - From `sprint_issues.json`: `total_sp`, `total_done_sp`, issues array (key, summary, status, sp, assignee)
-- From law files: churn rule — net SP added must be offset by equal removal; violations are flag-worthy
 
 ### 2. Delivery Summary
 
@@ -81,7 +80,7 @@ Compute:
 - `removed_sp` = sum of `sp` for removed issues
 - `net_churn_sp` = `added_sp - removed_sp`
 
-Churn rule violation: if `net_churn_sp > 0`, flag as a violation — more SP was added than removed.
+Report added, removed, and net churn as **information** for the retro — mid-sprint scope movement the team may want to discuss. There is no churn rule or violation; do not flag net churn as a policy breach.
 
 If `jira_batch_get_changelogs` is unavailable or returns no changelog data, still write the full CHURN section skeleton with the `===SECTION:CHURN===` sentinel, a top-line note "Churn data unavailable", and both Added and Removed subsections showing "None".
 
@@ -101,7 +100,7 @@ Note contributing factors (e.g., churn? blockers? scope change?).
 
 Write structured markdown to `{WORKDIR}/analysis.md` using this exact structure. Include all sentinel lines exactly as shown.
 
-```
+```text
 ===SECTION:DELIVERY===
 ## Delivery Summary
 
@@ -140,7 +139,7 @@ Write structured markdown to `{WORKDIR}/analysis.md` using this exact structure.
 
 **Net churn**: +<added_sp> / -<removed_sp> = <net_churn_sp> SP
 
-<⚠️ Churn violation: more SP was added than removed — flag for retro discussion. | "No churn violations.">
+<One line noting net churn as information for the retro — e.g. "Net +<net_churn_sp> SP added mid-sprint; worth a retro discussion." when non-zero, or "No net churn." when zero. Not a violation.>
 
 ===SECTION:GOAL_ANALYSIS===
 ## Sprint Goal Analysis
@@ -154,12 +153,13 @@ Write structured markdown to `{WORKDIR}/analysis.md` using this exact structure.
 ## Retrospective Input
 
 <Numbered list of retro items. What went well (delivery, goal achievement) and what to improve
-(churn violations, low delivery rate). Name specific issues or patterns, not generic advice.>
+(net churn, low delivery rate). Name specific issues or patterns, not generic advice.>
 ```
 
 ## Verify
 
 After writing `{WORKDIR}/analysis.md`, read it back and confirm:
+
 - All four sentinel lines are present: `===SECTION:DELIVERY===`, `===SECTION:CHURN===`, `===SECTION:GOAL_ANALYSIS===`, `===SECTION:ACTIONS===` (note: HEADER section is NOT written by this agent — SKILL.md generates the header)
 - The DELIVERY section contains the summary table and spill list
 - The CHURN section contains both Added and Removed subsections (even if "None")

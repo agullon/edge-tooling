@@ -13,6 +13,7 @@ from _jira_transforms import (
     extract_flagged,
     extract_blocked_by,
     extract_assignee_username,
+    extract_user_username,
     extract_display_name,
     is_stale,
     safe_format_date,
@@ -41,6 +42,8 @@ def transform_story(raw, today):
         "status": status,
         "assignee": extract_assignee_username(raw),
         "assignee_display": extract_display_name(assignee_raw, fallback="Unassigned"),
+        "qa_contact": extract_user_username(raw.get("customfield_10470")),
+        "qa_contact_display": extract_display_name(raw.get("customfield_10470"), fallback="None"),
         "sp": extract_sp(raw, issue_type),
         "epic_key": extract_parent_key(raw),
         "flagged": extract_flagged(raw),
@@ -73,7 +76,7 @@ def compute_aggregates(stories):
         sp = story["sp"]
         done_set = DONE_STATUSES_OCPBUGS if story["key"].startswith("OCPBUGS-") else DONE_STATUSES_STORIES
         is_done = story["status"] in done_set
-        is_bug = story["type"] == "Bug"
+        # Bugs are pointed and counted like any other work (edge-context decision 0003).
 
         stories_by_epic.setdefault(epic, []).append(key)
         sp_by_epic[epic] = sp_by_epic.get(epic, 0) + sp
@@ -81,17 +84,17 @@ def compute_aggregates(stories):
 
         if assignee:
             stories_by_assignee.setdefault(assignee, []).append(key)
-            if not is_done and not is_bug and sp > 0:
+            if not is_done and sp > 0:
                 sp_by_assignee[assignee] = sp_by_assignee.get(assignee, 0) + sp
                 sp_by_assignee_by_epic.setdefault(epic, {})
                 sp_by_assignee_by_epic[epic][assignee] = (
                     sp_by_assignee_by_epic[epic].get(assignee, 0) + sp
                 )
         else:
-            if not is_done and not is_bug:
+            if not is_done:
                 unassigned_stories.append(key)
 
-        if sp == 0 and not is_bug and not is_done:
+        if sp == 0 and not is_done:
             unpointed_stories.append(key)
 
     for epic in sp_by_epic:

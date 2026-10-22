@@ -15,7 +15,7 @@
 
 {CUT_LINE}
 
-## People over target
+## People far above the soft guideline
 
 {PEOPLE}
 

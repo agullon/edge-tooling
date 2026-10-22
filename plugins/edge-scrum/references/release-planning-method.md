@@ -11,14 +11,15 @@ All arithmetic lives in `plugins/edge-scrum/bin/run-checks.py`. The analysis sub
 | Features / Initiatives | OCPSTRAT, label `ocpedge-plan` or `microshift`, Target Version = `openshift-{VERSION}` | Fetched in PM rank order (`ORDER BY Rank ASC`); the position is persisted as `rank` |
 | Epics | Parent Link → feature | Target Version and Fix Version are read for scope filtering |
 | Stories / Spikes / Tasks / Bugs | `parent in (epics)` | `updated` date and Sprint field are read as activity evidence |
-| Roster | `.roster.json` | `sp_target` per member; law 09 default is 8 SP/sprint |
+| Roster | `.roster.json` | `sp_target` per member; ~8 SP/sprint is a soft guideline (law 09), not a cap |
 | Sprints left | `sprints.json` | Active + future sprints up to **pencils down**, not branch cut |
+| Team velocity | `velocity.json` (optional) | Avg completed SP of team-owned issues over the last 3 closed sprints; drives capacity (law 09, edge-context decision 0015) |
 
 ## Scope filtering
 
 Before anything is counted, the tool decides which work belongs to this release.
 
-**Epics are excluded** when they are already `Dev Complete` or `Closed` (law 04: docs/QE/CI stories may still be open, but that is not feature-dev capacity before pencils down), or when their Target Version or Fix Version is set and does not match the release. A version matches when it names the release as a whole token: `5.1`, `5.1.0`, `5.1.z`, `openshift-5.1`, `MicroShift 5.1`; `5.10` does not match `5.1`. Excluded epics and their open SP are listed in the report's process-gaps data so nothing disappears silently.
+**Epics are excluded** when they are already `Dev Complete`, `Testing`, `Release Pending` or `Closed` (law 04: docs/QE/CI stories may still be open, but that is not feature-dev capacity before pencils down), or when their Target Version or Fix Version is set and does not match the release. A version matches when it names the release as a whole token: `5.1`, `5.1.0`, `5.1.z`, `openshift-5.1`, `MicroShift 5.1`; `5.10` does not match `5.1`. Excluded epics and their open SP are listed in the report's process-gaps data so nothing disappears silently.
 
 If an excluded epic's version tag disagrees with its parent feature, fix the tag in Jira and re-run; the tool never aliases versions. A version alias (`5.1 = 4.22`) would encode a mapping the data itself can contradict — the same tag can sit on both finished and carry-over work — so the correct fix is the field, not a CLI flag. Open SP under a mistagged epic is surfaced in the verdict line as "pending version confirmation" so it is not lost while the tag is corrected.
 
@@ -48,21 +49,30 @@ Risk checks run on **active** features only. Dormant features are a scope decisi
 ### Capacity
 
 ```text
-capacity = Σ over roster members ( sp_target × sprints_left )
+effective_sprints = Σ availability_i over the remaining sprints   (availability_i ∈ [0,1], default 1.0)
+
+capacity = team_velocity × effective_sprints                  (preferred)
+team_velocity = avg completed SP of team-owned issues over the last 3 closed sprints
+
+capacity = Σ over roster members ( sp_target ) × effective_sprints (fallback)
 ```
 
-Every roster member counts, including those with nothing assigned. People who carry work but are not on the roster contribute **zero** capacity and are listed as roster drift; their work still counts as scope. The two sides of the comparison must cover the same team, otherwise the gap is meaningless — a person missing from the roster inflates scope without adding capacity, and an idle roster member is capacity the tool would otherwise ignore.
+Capacity is planned against the team's **measured velocity** (law 09, edge-context decision 0015): the average completed SP — of issues the team owns by the law 00 roster rule (assignee or QA Contact on the roster), bugs included (decision 0003) — over the last 3 closed sprints, projected across the sprints that remain. `meta.capacity_basis` records which basis was used.
 
-Not yet modelled: PTO, public holidays, the partial current sprint, and bug-fix load. Law 09 requires capacity to be adjusted for the first two; until that is done, treat capacity as an upper bound.
+When no velocity figure is available (the skill skipped the closed-sprint fetch, or there are no closed sprints), the tool **falls back** to the roster sum `Σ sp_target × sprints_left` and the method table says `roster fallback; team velocity was unavailable`. In the fallback, every roster member counts, including idle ones; people who carry work but are not on the roster contribute zero capacity and are listed as roster drift while their work still counts as scope.
+
+Both bases are scaled by **availability** (law 09: velocity "adjusted for PTO and holidays"). `--availability` takes one fraction per remaining sprint (0–1); a sprint at 0.8 contributes 0.8 of a sprint's capacity. Omitted, every sprint is 1.0 and the method table says *not adjusted for PTO*. The skill asks the user for known PTO/holidays and converts people-days away into these fractions. `meta.availability` records the values used.
+
+There is no fixed per-person capacity limit — `sp_target` (~8) is only a soft guideline for spotting far-above/far-below individual load (see *Person far above the soft guideline*). Velocity already reflects PTO/holidays to the extent they occurred in the sampled sprints; the explicit availability input adjusts the *projection* for PTO known in the remaining sprints. The partial current sprint is still not modelled, so treat capacity as an upper bound.
 
 ### Scope (pointed)
 
 ```text
-scope = Σ story points of open, non-bug stories
+scope = Σ story points of open issues (stories and bugs)
         under active features that pass the data-quality gate
 ```
 
-Bugs are always 0 SP (law 14). Features that fail the gate (no epics, or no stories) have no numeric scope and are reported as data-quality failures.
+Bugs are pointed and counted like other work (edge-context decision 0003). Features that fail the gate (no epics, or no stories) have no numeric scope and are reported as data-quality failures.
 
 ### Hidden scope
 
@@ -76,6 +86,8 @@ SP per story: 25th / 50th / 75th percentile (inclusive method) of closed pointed
 
 Shown as a range, never added to the pointed total. The number of unpointed stories that are already assigned is reported too, because those are the ones most likely to be pulled into a sprint.
 
+**Bugs are excluded from this estimate.** Although bugs are story-pointed (decision 0003), in practice none carry points yet, so multiplying the whole unpointed-bug backlog by a story-sized estimate would badly inflate hidden scope. Unpointed open bugs are instead reported separately as `unpointed_bugs` / `unpointed_bug_keys` — a count and list to be pointed at refinement, not an SP figure.
+
 ### Gap
 
 ```text
@@ -87,22 +99,24 @@ gap incl. hidden = capacity − scope − hidden estimate   (shown as a range)
 
 Active features are listed in PM rank order with cumulative remaining SP. The first feature whose cumulative total crosses capacity is marked *partial*; everything after it *over*. This answers "what comes out" using an ordering the team already maintains. If the Jira rank is stale, so is this table — it does not make scope decisions, it shows where the current ordering meets capacity.
 
-### Person over target
+### Person far above the soft guideline
 
 ```text
-over  if assigned open SP  >  sp_target × sprints_left
+flagged (ABOVE_GUIDELINE)  if assigned open SP  >  1.5 × sp_target × effective_sprints
 ```
 
-Unpointed assigned stories are shown beside the SP figure and never summed into it. A person who looks fine on points but carries several unpointed stories is probably full.
+This is **not** a capacity limit (edge-context decision 0015 removed the per-person cap); each person's own `sp_target` (~8) is a soft guideline, and this check flags only people whose load is **far** above it — more than 1.5× their guideline across the availability-adjusted sprints left, the same threshold sprint-health uses — so a normal overrun of a point or two is left alone. It is **informational**: a flagged person is surfaced for rebalancing but does **not** add a composite risk signal (feature-level capacity risk is the velocity-based timeline check). Team capacity is the velocity figure above, not the sum of these per-person targets. Unpointed assigned stories are shown beside the SP figure and never summed into it. A person who looks fine on points but carries several unpointed stories is probably full.
 
 ### Feature timeline
 
 ```text
-velocity_on_feature = Σ roster contributors ( sp_target × share )
+velocity_factor = team_velocity ÷ Σ roster sp_target (1.0 when velocity unavailable)
+velocity_on_feature = Σ roster contributors ( sp_target × velocity_factor × share )
     share = that person's open SP on this feature ÷ their total open SP across all active features
     non-roster contributors add no velocity (consistent with capacity)
 sprints_needed = remaining SP ÷ velocity_on_feature
-HIGH  if sprints_needed > sprints_left
+effective_sprints = Σ availability_i over the remaining sprints (default 1.0)
+HIGH  if sprints_needed > effective_sprints
 NO_CONTRIBUTORS  if remaining SP > 0 and nobody is assigned
 ```
 
@@ -111,7 +125,7 @@ This is a proportional model: a contributor's target is split across their featu
 ### Sizing (informational)
 
 ```text
-dedicated_sprints = total pointed SP (done + open, non-bug)
+dedicated_sprints = total pointed SP (done + open, all types incl. bugs)
                     ÷ Σ contributors' sp_target
 Undersized  if dedicated_sprints > max sprints for the T-shirt size
             or (size XS/S and ≥ 4 epics and ≥ 50 SP)
@@ -131,41 +145,42 @@ This compares the feature's own size against its label, assuming its contributor
 
 ```text
 signals = count of { timeline HIGH/NO_CONTRIBUTORS,
-                     any contributor over target,
                      SPOF or unassigned stories,
                      unassigned Blocker/Critical bug,
                      data-quality FAIL }
 HIGH ≥ 3 · MEDIUM = 2 · LOW ≤ 1
 ```
 
-Overall report risk is HIGH if any feature is HIGH, MEDIUM if any is MEDIUM, else LOW. Thresholds are a convention, not a calibration; they were chosen so that a single signal never escalates a feature on its own.
+Per-person capacity load (a contributor far above the soft guideline) is **shown** on the composite row for context but is **not counted** — feature-level capacity risk is carried by the velocity-based timeline signal, so counting the per-person flag too would double-count one heavy contributor. Overall report risk is HIGH if any feature is HIGH, MEDIUM if any is MEDIUM, else LOW. Thresholds are a convention, not a calibration; they were chosen so that a single signal never escalates a feature on its own.
 
 ### Data-quality gate
 
-The gate is **completion-aware** (already-done stories are removed before the ratio, so a nearly-finished feature is not penalised for the estimates on work it has shipped) and **importance-weighted** (an open Blocker/Critical story with no estimate always WARNs; a couple of low-priority unpointed leftovers on a feature that is clearly underway are treated as noise). Story size cannot weight unpointed items — they have no points by definition — so priority stands in for importance. Constants: important priorities = `Blocker`, `Critical`; small unpointed remainder = `2`.
+The gate is **completion-aware** (already-done stories are removed before the ratio, so a nearly-finished feature is not penalised for the estimates on work it has shipped) and **importance-weighted** (an open Blocker/Critical issue with no estimate always WARNs; a couple of low-priority unpointed leftovers on a feature that is clearly underway are treated as noise). Issue size cannot weight unpointed items — they have no points by definition — so priority stands in for importance. Constants: important priorities = `Blocker`, `Critical`; small unpointed remainder = `2`.
 
-Conditions are evaluated **top to bottom; the first that matches wins.** "Open" excludes done stories (`Closed`, and `Verified` for OCPBUGS); bugs are never counted as stories here.
+Conditions are evaluated **top to bottom; the first that matches wins.** "Open" excludes done issues (`Closed`, and `Verified` for OCPBUGS); bugs count as issues here, pointed like other work (edge-context decision 0003).
 
 | # | Condition | Result | Reason shown |
 |---|---|---|---|
 | 1 | No epics, but one or more were excluded (done / other-release) | FAIL | `all N epics excluded (<first reason>)` |
 | 2 | No epics and none excluded | FAIL | `no epics created` |
-| 3 | Epics exist but no non-bug stories | FAIL | `epics have no stories` |
-| 4 | All non-bug stories are done | PASS | `all N stories complete` |
-| 5 | No open story is unpointed | PASS | — |
-| 6 | ≥ 1 open Blocker/Critical story is unpointed | WARN | `N blocker/critical open stories lack an estimate` |
-| 7 | ≥ 50 % of open stories are pointed | PASS | — |
-| 8 | ≤ 2 low-priority open stories unpointed **and** ≥ 1 story done | PASS | `nearly done (X% complete), only N low-priority open stories unpointed` |
-| 9 | Otherwise | WARN | `N of M open stories unestimated` |
+| 3 | Epics exist but no issues at all | FAIL | `epics have no issues` |
+| 4 | All issues are done | PASS | `all N issues complete` |
+| 5 | No open issue is unpointed | PASS | — |
+| 6 | ≥ 1 open Blocker/Critical issue is unpointed | WARN | `N blocker/critical open issues lack an estimate` |
+| 7 | ≥ 50 % of open issues are pointed | PASS | — |
+| 8 | ≤ 2 low-priority open issues unpointed **and** ≥ 1 issue done | PASS | `nearly done (X% complete), only N low-priority open issues unpointed` |
+| 9 | Otherwise | WARN | `N of M open issues unestimated` |
 
-After a PASS from rows 4–8, one overlay applies: if any of the feature's live epics has no non-bug stories, the feature is downgraded to **WARN** — `N of M epics have no stories` — because it is only partially refined.
+After a PASS from rows 4–8, one overlay applies: if any of the feature's live epics has no non-bug stories, the feature is downgraded to **WARN** — `N of M epics have no non-bug stories` — because it is only partially refined. (An epic covered only by bugs is not feature-refined; this is a refinement signal, independent of decision 0003 counting those bugs' points toward scope and capacity.)
 
 FAIL features are excluded from capacity and timeline arithmetic (there is nothing to sum). A feature that FAILs only because its epics were all excluded (row 1) is finished or mis-targeted, not un-refined — the report says so rather than "no epics created", and lists these features separately in the process gaps. WARN features are included; their unpointed stories feed the hidden-scope estimate.
 
 ## Known limitations
 
-- Capacity ignores PTO, holidays, partial sprints and bug-fix time. Treat it as an upper bound.
-- Timeline and capacity signals both respond to the same overloaded contributors, so an overcommitted person raises the risk of every feature they touch. That is often correct, but it is not two independent findings.
+- Velocity-based capacity reflects PTO, holidays and bug-fix load only to the extent they occurred in the 3 sampled sprints; the partial current sprint is not modelled. A roster that changed size since those sprints makes the projection stale. Treat capacity as an upper bound. The `--availability` input adjusts the projection for PTO known in the *remaining* sprints, but only if the user supplies it; when omitted, capacity is not adjusted for upcoming PTO and the report says so. When velocity is unavailable the roster-sum fallback also honours `--availability` but otherwise ignores PTO/holidays.
+- Open bug points now count toward scope and capacity (decision 0003); a surge of newly-filed bugs after the velocity sample raises scope without the velocity having anticipated it.
+- Hidden scope covers unpointed **stories** only. Unpointed bugs are reported separately (`unpointed_bugs`) and excluded from the SP estimate: no bugs carry points yet, so folding them in would inflate hidden scope by the size of the whole bug backlog. The trade-off is that genuinely large unpointed bugs do not appear in the hidden-scope range — point them at refinement to make them visible.
+- Feature-level capacity risk is the velocity-based timeline signal; a person being far above their soft guideline is reported separately for rebalancing but does not by itself raise a feature's composite risk, so the two are not double-counted. Both still trace back to the same load numbers, so a genuinely overcommitted person will tend to show up in both the timeline risk and the per-person flag.
 - The cut line depends on the Jira rank being current.
 - Hidden-scope estimates use the team's own closed-story distribution, which may not represent the unpointed stories.
 - Story sprint membership and `updated` are only as good as Jira hygiene. A feature can be classified dormant because nobody touched the tickets, not because nobody worked on it.

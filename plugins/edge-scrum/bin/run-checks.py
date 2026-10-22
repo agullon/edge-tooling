@@ -14,11 +14,18 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _jira_transforms import load_json, write_output, parse_date, extract_sprint_number
+from _jira_transforms import (
+    load_json,
+    write_output,
+    parse_date,
+    extract_sprint_number,
+    build_roster_index,
+    roster_match,
+)
 
 DONE_STATUSES_STORIES = {"Closed"}
 DONE_STATUSES_OCPBUGS = {"Closed", "Verified"}
-DONE_STATUSES_EPICS = {"Closed", "Dev Complete"}
+DONE_STATUSES_EPICS = {"Closed", "Dev Complete", "Testing", "Release Pending"}
 ACTIVE_STORY_STATUSES = {"In Progress", "Review"}
 NEW_FEATURE_STATUSES = {"New"}
 
@@ -71,7 +78,7 @@ def _version_matches(names, version):
 def build_hierarchy(features, epics, stories, bugs, component_filter, version=None):
     """Build Feature -> Epics -> Stories tree. Returns (feature dicts, unlinked bugs).
 
-    Epics that are already done (Dev Complete/Closed) or that target another
+    Epics that are already done (Dev Complete/Testing/Release Pending/Closed) or that target another
     release are removed from the scope math and recorded on the feature as
     ``excluded_epics`` so the report can show what was left out and why.
     """
@@ -101,8 +108,9 @@ def build_hierarchy(features, epics, stories, bugs, component_filter, version=No
             if not epic:
                 continue
             epic_stories = stories_by_epic.get(ekey, [])
-            open_sp = sum(s["sp"] for s in epic_stories if not is_story_done(s) and s["type"] != "Bug")
-            open_count = sum(1 for s in epic_stories if not is_story_done(s) and s["type"] != "Bug")
+            # Bugs are pointed and counted like other work (edge-context decision 0003).
+            open_sp = sum(s["sp"] for s in epic_stories if not is_story_done(s))
+            open_count = sum(1 for s in epic_stories if not is_story_done(s))
             reason = None
             if epic.get("status") in DONE_STATUSES_EPICS:
                 reason = f"epic is {epic['status']}"
@@ -171,6 +179,32 @@ def is_story_done(story):
     return story["status"] in DONE_STATUSES_STORIES
 
 
+_PLACEHOLDER_ASSIGNEE_DISPLAY = {"Unassigned", "None", "Field not configured"}
+
+
+def canonicalize_assignees(features, roster_index):
+    """Rewrite each story's ``assignee`` to its roster username when it matches.
+
+    Live Jira returns users with ``email: null``, so a story's ``assignee`` may be a
+    display name — or null while only ``assignee_display`` carries the name — that
+    does not equal the roster username every capacity/timeline/sizing/SPOF lookup
+    keys on. Resolve it once here, by email/username or display name
+    (:func:`roster_match`, law 00), so each teammate's work groups under one
+    canonical key. Work owned by a non-roster user keeps its id (or falls back to the
+    display name when the id is null) so it still surfaces as roster drift rather than
+    silently dropping out of the load math.
+    """
+    for f in features:
+        for s in f.get("all_stories", []):
+            member = roster_match(s.get("assignee"), s.get("assignee_display"), roster_index)
+            if member:
+                s["assignee"] = member["username"]
+            elif not s.get("assignee"):
+                disp = s.get("assignee_display")
+                if disp and disp not in _PLACEHOLDER_ASSIGNEE_DISPLAY:
+                    s["assignee"] = disp
+
+
 # --- Active / dormant classification ---
 
 
@@ -203,6 +237,9 @@ def feature_activity(f, today=None, activity_days=DEFAULT_ACTIVITY_DAYS, window=
     release window. Assignment alone is not evidence — an assignee set at
     creation and never touched does not mean work is happening.
     """
+    # Bugs are deliberately excluded here regardless of their points: bug activity
+    # does not prove *feature delivery* is underway (edge-context decision 0003
+    # points bugs, but that is a scope/capacity concern, not activity evidence).
     for s in f["all_stories"]:
         if s["type"] == "Bug":
             continue
@@ -234,6 +271,9 @@ def classify_feature(f, today=None, activity_days=DEFAULT_ACTIVITY_DAYS, window=
         if excluded:
             return "dormant", f"New, all {len(excluded)} epics excluded ({excluded[0]['reason']})"
         return "dormant", "New, no epics"
+    # Bugs under a New feature are not evidence that the feature is being delivered
+    # (same rationale as feature_activity); decision 0003 points bugs but that is a
+    # scope/capacity concern, not a dormant-vs-active signal.
     non_bug = [s for s in f["all_stories"] if s["type"] != "Bug"]
     if not non_bug:
         return "dormant", "New, epics have no stories"
@@ -289,10 +329,11 @@ def run_data_quality_gate(features):
     results = []
     for f in features:
         epic_count = len(f["epics"])
-        non_bug = [s for s in f["all_stories"] if s["type"] != "Bug"]
-        total = len(non_bug)
-        done_count = sum(1 for s in non_bug if is_story_done(s))
-        open_stories = [s for s in non_bug if not is_story_done(s)]
+        # Bugs count toward the breakdown like other work (edge-context decision 0003).
+        breakdown = list(f["all_stories"])
+        total = len(breakdown)
+        done_count = sum(1 for s in breakdown if is_story_done(s))
+        open_stories = [s for s in breakdown if not is_story_done(s)]
         open_count = len(open_stories)
         unpointed_open = [s for s in open_stories if s["sp"] <= 0]
         pointed_open_count = open_count - len(unpointed_open)
@@ -314,31 +355,34 @@ def run_data_quality_gate(features):
             else:
                 status, reason = "FAIL", "no epics created"
         elif total == 0:
-            status, reason = "FAIL", "epics have no stories"
+            status, reason = "FAIL", "epics have no issues"
         elif open_count == 0:
-            status, reason = "PASS", f"all {total} stories complete"
+            status, reason = "PASS", f"all {total} issues complete"
         elif not unpointed_open:
             status, reason = "PASS", ""
         elif critical_unpointed:
             n = len(critical_unpointed)
-            verb = "story lacks" if n == 1 else "stories lack"
+            verb = "issue lacks" if n == 1 else "issues lack"
             status, reason = "WARN", f"{n} blocker/critical open {verb} an estimate"
         elif pointed_pct >= 50:
             status, reason = "PASS", ""
         elif len(unpointed_open) <= SMALL_UNPOINTED_REMAINDER and done_count >= 1:
             status, reason = "PASS", (
                 f"nearly done ({completion_pct}% complete), "
-                f"only {len(unpointed_open)} low-priority open {'story' if len(unpointed_open)==1 else 'stories'} unpointed")
+                f"only {len(unpointed_open)} low-priority open {'issue' if len(unpointed_open)==1 else 'issues'} unpointed")
         else:
-            status, reason = "WARN", f"{len(unpointed_open)} of {open_count} open stories unestimated"
+            status, reason = "WARN", f"{len(unpointed_open)} of {open_count} open issues unestimated"
 
         # An otherwise-clean feature that still has an epic with no stories is only
-        # partially refined — surface it as a WARN rather than a silent PASS.
+        # partially refined — surface it as a WARN rather than a silent PASS. Bugs
+        # are excluded here deliberately: an epic covered only by bugs is not
+        # feature-refined (same rationale as the dormant check), independent of
+        # decision 0003 counting those bugs' points toward scope/capacity.
         empty_epics = [e for e in f["epics"]
                        if not any(s["type"] != "Bug" for s in e.get("stories", []))]
         if status == "PASS" and len(empty_epics) >= 1:
             status = "WARN"
-            reason = f"{len(empty_epics)} of {len(f['epics'])} epics have no stories"
+            reason = f"{len(empty_epics)} of {len(f['epics'])} epics have no non-bug stories"
 
         results.append({
             "feature_key": f["key"],
@@ -364,14 +408,25 @@ def run_data_quality_gate(features):
 # --- Check 1: Capacity ---
 
 
-def run_capacity_check(features, gate_results, roster, remaining_sprints):
-    """Per-person load vs capacity.
+def run_capacity_check(features, gate_results, roster, remaining_sprints, effective_sprints=None):
+    """Per-person load vs the soft guideline.
 
-    Every roster member appears (even with no work) so the capacity total covers
-    the whole team. Non-roster assignees appear with capacity 0 and
-    ``in_roster: false`` — their work counts as scope, and the report asks for
-    the roster to be reconciled. Only stories under PASS/WARN features count.
+    The ~sp_target SP/person/sprint figure is a soft planning guideline (edge-context
+    decision 0015), not a cap: feature-level capacity risk comes from the velocity-based
+    timeline check, not from one person being individually heavy. So a person is flagged
+    ``ABOVE_GUIDELINE`` only when their assigned open SP is **far** above the guideline
+    (> 1.5 × sp_target × effective sprints), matching sprint-health; a normal overrun of
+    a point or two is left as OK.
+
+    Every roster member appears (even with no work) so the report can show the whole
+    team. Non-roster assignees appear with guideline 0 and ``in_roster: false`` — their
+    work counts as scope, and the report asks for the roster to be reconciled. Only
+    stories under PASS/WARN features count. ``effective_sprints`` is the
+    availability-adjusted sprints left (Σ availability); it defaults to
+    ``remaining_sprints`` so the guideline matches the capacity/timeline cut-line.
     """
+    if effective_sprints is None:
+        effective_sprints = remaining_sprints
     passed_keys = {g["feature_key"] for g in gate_results if g["status"] in ("PASS", "WARN")}
     roster_map = {m["username"]: m for m in roster.get("members", [])}
 
@@ -384,7 +439,8 @@ def run_capacity_check(features, gate_results, roster, remaining_sprints):
         if f["key"] not in passed_keys:
             continue
         for s in f["all_stories"]:
-            if is_story_done(s) or s["type"] == "Bug" or not s["assignee"]:
+            # Bugs load a person like any other pointed work (edge-context decision 0003).
+            if is_story_done(s) or not s["assignee"]:
                 continue
             person_display.setdefault(s["assignee"], s.get("assignee_display", s["assignee"]))
             person_features.setdefault(s["assignee"], set()).add(f["key"])
@@ -399,17 +455,25 @@ def run_capacity_check(features, gate_results, roster, remaining_sprints):
         member = roster_map.get(person)
         assigned_sp = sp_by_person.get(person, 0)
         sp_target = member.get("sp_target", DEFAULT_SP_TARGET) if member else DEFAULT_SP_TARGET
-        capacity = sp_target * remaining_sprints if member else 0
-        overrun = max(0, assigned_sp - capacity) if member else assigned_sp
+        # Soft guideline load for the release; flag only when far (>1.5×) above it.
+        guideline = sp_target * effective_sprints if member else 0
+        overrun = max(0, assigned_sp - guideline) if member else assigned_sp
+        if not member:
+            status = "NOT_IN_ROSTER"
+        elif assigned_sp > 1.5 * guideline:
+            status = "ABOVE_GUIDELINE"
+        else:
+            status = "OK"
         results.append({
             "person": person,
             "display_name": person_display.get(person, person),
             "assigned_sp": assigned_sp,
             "unpointed_assigned": unpointed_by_person.get(person, 0),
             "sp_target": sp_target,
-            "remaining_capacity": capacity,
-            "overrun": overrun,
-            "status": "OVER" if (member and overrun > 0) else ("NOT_IN_ROSTER" if not member else "OK"),
+            "remaining_capacity": round(guideline, 1),
+            "overrun": round(overrun, 1),
+            # ABOVE_GUIDELINE replaces the old OVER status; readers accept both.
+            "status": status,
             "features": sorted(person_features.get(person, set())),
             "in_roster": member is not None,
         })
@@ -418,18 +482,75 @@ def run_capacity_check(features, gate_results, roster, remaining_sprints):
     return results
 
 
+def team_capacity(team_velocity, roster, remaining_sprints, availability=None):
+    """Total team capacity (SP) to pencils down, and the basis used.
+
+    Preferred basis is the team's measured velocity (edge-context decision 0015):
+    average completed SP over the last 3 closed sprints, projected across the
+    sprints that remain. When no velocity is available we fall back to the roster
+    sum (Σ sp_target × sprints left) and flag it so the report can say so.
+
+    ``availability`` is an optional list of per-remaining-sprint availability
+    fractions (0–1, law 09: velocity "adjusted for PTO and holidays"). Capacity
+    is the per-sprint rate times the sum of those fractions, so a sprint where the
+    team is only 80% available contributes 0.8 sprints of capacity. When omitted,
+    every remaining sprint counts as fully available (1.0).
+
+    Returns ``(capacity_sp, basis)`` where basis is ``"velocity"`` or
+    ``"roster_fallback"``.
+    """
+    avail = availability if availability else [1.0] * remaining_sprints
+    effective_sprints = sum(avail)
+    if team_velocity is not None:
+        return round(team_velocity * effective_sprints), "velocity"
+    targets = [m.get("sp_target", DEFAULT_SP_TARGET) for m in roster.get("members", [])]
+    return round(sum(targets) * effective_sprints), "roster_fallback"
+
+
 # --- Check 2: Timeline ---
 
 
-def run_timeline_check(features, gate_results, roster, remaining_sprints):
-    """Per-feature timeline projection with proportional velocity."""
+def velocity_scaling_factor(team_velocity, roster):
+    """Scale per-person sp_target throughput to match measured team velocity.
+
+    The timeline check projects each person delivering their ``sp_target`` per
+    sprint. When the team's measured velocity is known it is usually below the
+    roster-target sum (decision 0015), so without scaling the per-feature
+    timelines would assume a faster pace than the capacity figure. Return
+    ``team_velocity / Σ sp_target`` so timeline and capacity use the same pace;
+    return ``1.0`` when velocity is unavailable or the roster has no targets.
+    """
+    if team_velocity is None:
+        return 1.0
+    target_sum = sum(m.get("sp_target", DEFAULT_SP_TARGET) for m in roster.get("members", []))
+    if target_sum <= 0:
+        return 1.0
+    return team_velocity / target_sum
+
+
+def run_timeline_check(features, gate_results, roster, remaining_sprints,
+                       velocity_factor=1.0, effective_sprints=None):
+    """Per-feature timeline projection with proportional velocity.
+
+    ``velocity_factor`` scales each person's ``sp_target`` throughput so the
+    timeline pace matches the measured team velocity (see
+    :func:`velocity_scaling_factor`); it defaults to 1.0 (roster-target pace).
+
+    ``effective_sprints`` is the availability-adjusted number of sprints left
+    (Σ availability) to compare each feature against, so timeline risk agrees with
+    the capacity cut-line, which also uses availability. Defaults to
+    ``remaining_sprints`` (no PTO adjustment).
+    """
+    if effective_sprints is None:
+        effective_sprints = remaining_sprints
     passed_keys = {g["feature_key"] for g in gate_results if g["status"] in ("PASS", "WARN")}
     roster_map = {m["username"]: m for m in roster.get("members", [])}
 
     global_sp = {}
     for f in features:
         for s in f["all_stories"]:
-            if is_story_done(s) or s["type"] == "Bug" or s["sp"] <= 0 or not s["assignee"]:
+            # Bugs count toward remaining scope like other work (edge-context decision 0003).
+            if is_story_done(s) or s["sp"] <= 0 or not s["assignee"]:
                 continue
             global_sp[s["assignee"]] = global_sp.get(s["assignee"], 0) + s["sp"]
 
@@ -439,14 +560,15 @@ def run_timeline_check(features, gate_results, roster, remaining_sprints):
                 "rank": f.get("rank")}
         if f["key"] not in passed_keys:
             results.append({**base, "remaining_sp": 0, "unpointed_open": 0, "velocity_per_sprint": 0,
-                            "sprints_needed": 0, "sprints_left": remaining_sprints, "gap": 0, "risk": "N/A"})
+                            "sprints_needed": 0, "sprints_left": round(effective_sprints, 1),
+                            "gap": 0, "risk": "N/A"})
             continue
 
         remaining_sp = 0
         unpointed_open = 0
         feature_sp_by_person = {}
         for s in f["all_stories"]:
-            if is_story_done(s) or s["type"] == "Bug":
+            if is_story_done(s):
                 continue
             remaining_sp += s["sp"]
             if s["sp"] <= 0:
@@ -457,19 +579,27 @@ def run_timeline_check(features, gate_results, roster, remaining_sprints):
 
         velocity = 0.0
         for person, person_feature_sp in feature_sp_by_person.items():
-            # Non-roster people contribute no velocity, matching capacity (zero)
-            # — the roster-drift prompt is where this gets resolved.
-            sp_target = roster_map.get(person, {}).get("sp_target", 0)
+            # A roster member missing the sp_target field falls back to the single
+            # DEFAULT_SP_TARGET guideline (decision 0015); non-roster people
+            # contribute no velocity (0), matching capacity — resolved at the
+            # roster-drift prompt. (Must distinguish "in roster, no field" from
+            # "not in roster" so dropping sp_target does not zero every member.)
+            sp_target = (roster_map[person].get("sp_target", DEFAULT_SP_TARGET)
+                         if person in roster_map else 0)
             total_sp = global_sp.get(person, person_feature_sp)
             fraction = person_feature_sp / total_sp if total_sp > 0 else 0
-            velocity += sp_target * fraction
+            # Scale sp_target pace to measured team velocity so the timeline
+            # projection and the capacity figure use the same pace (I.4).
+            velocity += sp_target * velocity_factor * fraction
 
         if velocity <= 0:
             sprints_needed = float("inf") if remaining_sp > 0 else 0
         else:
             sprints_needed = remaining_sp / velocity
 
-        gap = max(0, sprints_needed - remaining_sprints) if sprints_needed != float("inf") else remaining_sprints
+        # Compare against the availability-adjusted sprints left so timeline risk
+        # agrees with the capacity cut-line (both account for PTO/holidays).
+        gap = max(0, sprints_needed - effective_sprints) if sprints_needed != float("inf") else effective_sprints
         risk = "NO_CONTRIBUTORS" if velocity <= 0 and remaining_sp > 0 else (
             "HIGH" if gap > 0 else "OK"
         )
@@ -480,7 +610,7 @@ def run_timeline_check(features, gate_results, roster, remaining_sprints):
             "unpointed_open": unpointed_open,
             "velocity_per_sprint": round(velocity, 1),
             "sprints_needed": round(sprints_needed, 1) if sprints_needed != float("inf") else "inf",
-            "sprints_left": remaining_sprints,
+            "sprints_left": round(effective_sprints, 1),
             "gap": round(gap, 1),
             "risk": risk,
         })
@@ -492,19 +622,20 @@ def run_timeline_check(features, gate_results, roster, remaining_sprints):
 
 
 def run_assignment_check(features):
-    """SPOF detection and unassigned work. Non-bug stories only."""
+    """SPOF detection and unassigned work. Bugs count like other work
+    (edge-context decision 0003)."""
     spof = []
     unassigned = []
 
     for f in features:
-        non_done_non_bug = [s for s in f["all_stories"] if not is_story_done(s) and s["type"] != "Bug"]
-        contributors = set(s["assignee"] for s in non_done_non_bug if s["assignee"])
-        unassigned_stories = [s for s in non_done_non_bug if not s["assignee"]]
+        non_done = [s for s in f["all_stories"] if not is_story_done(s)]
+        contributors = set(s["assignee"] for s in non_done if s["assignee"])
+        unassigned_stories = [s for s in non_done if not s["assignee"]]
 
         if len(contributors) == 1:
             sole = list(contributors)[0]
             display = next(
-                (s.get("assignee_display", sole) for s in non_done_non_bug if s["assignee"] == sole),
+                (s.get("assignee_display", sole) for s in non_done if s["assignee"] == sole),
                 sole
             )
             spof.append({
@@ -592,22 +723,26 @@ def run_sizing_check(features, timeline_results, roster=None):
     """
     timeline_map = {t["feature_key"]: t for t in timeline_results}
     roster_map = {m["username"]: m for m in (roster or {}).get("members", [])}
-    # No roster at all → assume the default target; roster present but person
-    # missing → zero, consistent with capacity and timeline.
+    # No roster at all → assume the default target for everyone. Roster present:
+    # a member (even one missing the sp_target field) uses DEFAULT_SP_TARGET; a
+    # non-roster contributor counts zero — consistent with capacity and timeline.
     missing_target = DEFAULT_SP_TARGET if roster is None else 0
 
     results = []
     for f in features:
         size = f["size"]
+        # Bugs count toward a feature's size like other work (edge-context decision 0003).
         open_sp = sum(s["sp"] for s in f["all_stories"] if not is_story_done(s))
-        total_sp = sum(s["sp"] for s in f["all_stories"] if s["type"] != "Bug")
+        total_sp = sum(s["sp"] for s in f["all_stories"])
         epic_count = len(f["epics"])
         contributors = set(
             s["assignee"] for s in f["all_stories"]
-            if not is_story_done(s) and s["type"] != "Bug" and s["assignee"]
+            if not is_story_done(s) and s["assignee"]
         )
         dedicated_velocity = sum(
-            roster_map.get(p, {}).get("sp_target", missing_target) for p in contributors
+            (roster_map[p].get("sp_target", DEFAULT_SP_TARGET) if p in roster_map
+             else missing_target)
+            for p in contributors
         )
         dedicated_sprints = round(total_sp / dedicated_velocity, 1) if dedicated_velocity > 0 else None
 
@@ -653,12 +788,15 @@ def run_composite_check(features, gate_results, capacity_results, timeline_resul
                          assignment_results, sizing_results, count_sizing=False):
     """Count independent signals per feature and assign composite risk.
 
-    Sizing is displayed but not counted by default: it is derived from the same
-    load numbers as the timeline and capacity signals and would triple-count
-    one overloaded contributor.
+    Sizing and per-person capacity are displayed but not counted: both are derived
+    from the same load numbers as the timeline signal and would double-count one
+    heavy contributor. Feature-level capacity risk is the velocity-based timeline
+    check (edge-context decision 0015), so an individual being above the soft
+    guideline is surfaced for context but does not add a signal.
     """
     gate_map = {g["feature_key"]: g["status"] for g in gate_results}
-    overloaded_people = {c["person"] for c in capacity_results if c["status"] == "OVER"}
+    overloaded_people = {c["person"] for c in capacity_results
+                         if c["status"] in ("ABOVE_GUIDELINE", "OVER")}
     timeline_risks = {t["feature_key"] for t in timeline_results if t["risk"] in ("HIGH", "NO_CONTRIBUTORS")}
     spof_keys = {s["feature_key"] for s in assignment_results["spof"]}
     unassigned_keys = {u["feature_key"] for u in assignment_results["unassigned"]}
@@ -691,13 +829,17 @@ def run_composite_check(features, gate_results, capacity_results, timeline_resul
         else:
             signal_details["timeline"] = "OK"
 
+        # Per-person capacity load is informational only — it does NOT add a composite
+        # signal. A contributor being above the soft guideline is shown for context, but
+        # feature-level capacity risk is carried by the velocity-based timeline check
+        # (edge-context decision 0015), so it is not double-counted here. Bugs are
+        # story-pointed and count toward load too (decision 0003).
         feature_contributors = set(
             s["assignee"] for s in f["all_stories"]
-            if not is_story_done(s) and s["type"] != "Bug" and s["assignee"]
+            if not is_story_done(s) and s["assignee"]
         )
         if feature_contributors & overloaded_people:
-            signals += 1
-            signal_details["capacity"] = "HIGH"
+            signal_details["capacity"] = "ABOVE_GUIDELINE"
         else:
             signal_details["capacity"] = "OK"
 
@@ -792,15 +934,25 @@ def build_cut_line(timeline_results, capacity_sp, timeline_risk_by_key=None):
 
 
 def estimate_hidden_scope(features, active_keys):
-    """Estimate SP for unpointed open stories from closed pointed stories' distribution."""
+    """Estimate SP for unpointed open stories from closed pointed stories' distribution.
+
+    Bugs are deliberately **excluded** from the hidden-scope estimate. Although
+    bugs are story-pointed (edge-context decision 0003), in practice none carry
+    points yet, so folding every unpointed bug into hidden scope would multiply
+    the whole bug backlog by a story-sized estimate and badly inflate the figure.
+    Unpointed open bugs are reported separately (``unpointed_bugs`` /
+    ``unpointed_bug_keys``) so the gap is still visible without distorting scope.
+    """
     closed_pointed = [
         s["sp"] for f in features for s in f["all_stories"]
-        if is_story_done(s) and s["type"] != "Bug" and s["sp"] > 0
+        if is_story_done(s) and s["sp"] > 0
     ]
-    unpointed = [
+    active_open_unpointed = [
         s for f in features if f["key"] in active_keys for s in f["all_stories"]
-        if not is_story_done(s) and s["type"] != "Bug" and s["sp"] <= 0
+        if not is_story_done(s) and s["sp"] <= 0
     ]
+    unpointed = [s for s in active_open_unpointed if s["type"] != "Bug"]
+    unpointed_bugs = [s for s in active_open_unpointed if s["type"] == "Bug"]
     n = len(unpointed)
     assigned = sum(1 for s in unpointed if s["assignee"])
     if len(closed_pointed) >= 4:
@@ -814,6 +966,8 @@ def estimate_hidden_scope(features, active_keys):
     return {
         "unpointed_open": n,
         "unpointed_assigned": assigned,
+        "unpointed_bugs": len(unpointed_bugs),
+        "unpointed_bug_keys": [s["key"] for s in unpointed_bugs],
         "sp_per_story_low": low,
         "sp_per_story_typical": typical,
         "sp_per_story_high": high,
@@ -855,21 +1009,47 @@ def build_method(meta, roster, remaining_sprints, hidden, activity_days, window,
     targets = [m.get("sp_target", DEFAULT_SP_TARGET) for m in members]
     avg_target = round(sum(targets) / len(targets), 1) if targets else DEFAULT_SP_TARGET
     win = f"S{window[0]}–S{window[1]}" if window else "n/a"
-    return [
-        {
+
+    # law 09: capacity is velocity "adjusted for PTO and holidays". availability is
+    # a per-remaining-sprint fraction (default 1.0); effective_sprints is their sum.
+    availability = meta.get("availability") or [1.0] * remaining_sprints
+    effective_sprints = round(sum(availability), 2)
+    pto_adjusted = any(a < 1.0 for a in availability)
+    pto_note = (f" (availability-adjusted: {availability} → {effective_sprints} effective sprints)"
+                if pto_adjusted else " (not adjusted for PTO)")
+    sprints_shown = effective_sprints if pto_adjusted else remaining_sprints
+
+    if meta.get("capacity_basis") == "velocity":
+        vel = meta["team_velocity"]
+        sprint_count = len(meta.get("velocity_sprints") or [])
+        capacity_entry = {
             "id": "capacity",
             "label": "Capacity",
-            "formula": "Σ over roster members of sp_target × sprints left (to pencils down)",
-            "inputs": {"roster_members": len(members), "avg_sp_target": avg_target, "sprints_left": remaining_sprints},
+            "formula": "team velocity × availability-adjusted sprints left (to pencils down); velocity = avg completed SP over the last 3 closed sprints (edge-context decision 0015); sprints left adjusted for PTO/holidays (law 09)",
+            "inputs": {"team_velocity": vel, "velocity_sprints": sprint_count, "sprints_left": remaining_sprints,
+                       "availability": availability, "effective_sprints": effective_sprints},
             "result": f"{meta['total_capacity_sp']} SP",
-            "shown_as": (f"{len(members)} people × {avg_target} SP × {remaining_sprints} sprints = {meta['total_capacity_sp']} SP"
-                         if len(set(targets)) <= 1 else
-                         f"Σ targets {sum(targets)} SP/sprint × {remaining_sprints} sprints = {meta['total_capacity_sp']} SP ({len(members)} people, targets {min(targets)}–{max(targets)})"),
-        },
+            "shown_as": f"{vel} SP/sprint (velocity over {sprint_count} sprints) × {sprints_shown} sprints = {meta['total_capacity_sp']} SP{pto_note}",
+        }
+    else:
+        capacity_entry = {
+            "id": "capacity",
+            "label": "Capacity",
+            "formula": "FALLBACK (no team velocity available): Σ over roster members of sp_target × availability-adjusted sprints left (to pencils down)",
+            "inputs": {"roster_members": len(members), "avg_sp_target": avg_target, "sprints_left": remaining_sprints,
+                       "availability": availability, "effective_sprints": effective_sprints},
+            "result": f"{meta['total_capacity_sp']} SP",
+            "shown_as": ((f"{len(members)} people × {avg_target} SP × {sprints_shown} sprints = {meta['total_capacity_sp']} SP"
+                          if len(set(targets)) <= 1 else
+                          f"Σ targets {sum(targets)} SP/sprint × {sprints_shown} sprints = {meta['total_capacity_sp']} SP ({len(members)} people, targets {min(targets)}–{max(targets)})")
+                         + " — roster fallback; team velocity was unavailable" + pto_note),
+        }
+    return [
+        capacity_entry,
         {
             "id": "scope",
             "label": "Scope (pointed)",
-            "formula": "Σ story points of open, non-bug stories under active features that pass the data-quality gate",
+            "formula": "Σ story points of open issues (stories and bugs) under active features that pass the data-quality gate",
             "inputs": {"active_features": meta["active_features"], "assessed_features": meta["assessed_features"]},
             "result": f"{meta['total_remaining_sp']} SP",
             "shown_as": f"{meta['assessed_features']} assessed features → {meta['total_remaining_sp']} SP open",
@@ -877,12 +1057,13 @@ def build_method(meta, roster, remaining_sprints, hidden, activity_days, window,
         {
             "id": "hidden_scope",
             "label": "Hidden scope",
-            "formula": "unpointed open stories × SP per story (low / typical / high from closed pointed stories)",
+            "formula": "unpointed open stories × SP per story (low / typical / high from closed pointed stories); bugs are excluded and reported separately as unpointed_bugs",
             "inputs": {"unpointed_open": hidden["unpointed_open"], "sp_low": hidden["sp_per_story_low"],
                        "sp_typical": hidden["sp_per_story_typical"], "sp_high": hidden["sp_per_story_high"],
-                       "basis": hidden["basis"]},
+                       "unpointed_bugs": hidden["unpointed_bugs"], "basis": hidden["basis"]},
             "result": f"{hidden['estimate_low']}–{hidden['estimate_high']} SP",
-            "shown_as": f"{hidden['unpointed_open']} × {hidden['sp_per_story_low']}–{hidden['sp_per_story_high']} SP = {hidden['estimate_low']}–{hidden['estimate_high']} SP",
+            "shown_as": f"{hidden['unpointed_open']} × {hidden['sp_per_story_low']}–{hidden['sp_per_story_high']} SP = {hidden['estimate_low']}–{hidden['estimate_high']} SP"
+                        + (f" ({hidden['unpointed_bugs']} unpointed bugs excluded)" if hidden["unpointed_bugs"] else ""),
         },
         {
             "id": "gap",
@@ -912,19 +1093,21 @@ def build_method(meta, roster, remaining_sprints, hidden, activity_days, window,
         },
         {
             "id": "overload",
-            "label": "Person over target",
-            "formula": "assigned open SP > sp_target × sprints left; unpointed assigned stories shown separately, never summed",
-            "inputs": {"sprints_left": remaining_sprints},
-            "result": f"{meta['overloaded_people_count']} people over",
-            "shown_as": f"{meta['overloaded_people_count']} over target, {meta['non_roster_people_count']} not on roster",
+            "label": "Person far above the soft guideline",
+            "formula": "flagged when assigned open SP > 1.5 × that person's sp_target × availability-adjusted sprints left; each person's own sp_target is the soft guideline (edge-context decision 0015), not a limit, so only load *far* above it is surfaced; informational — it adds no composite risk signal; unpointed assigned stories shown separately, never summed",
+            "inputs": {"sprints_left": remaining_sprints, "effective_sprints": effective_sprints,
+                       "threshold_multiple": 1.5},
+            "result": f"{meta['overloaded_people_count']} people far above guideline",
+            "shown_as": f"{meta['overloaded_people_count']} far above the soft guideline (>1.5× their sp_target), {meta['non_roster_people_count']} not on roster",
         },
         {
             "id": "timeline",
             "label": "Feature timeline",
-            "formula": "sprints needed = remaining SP ÷ Σ roster contributors (sp_target × share of that person's total open SP on this feature); non-roster contributors add no velocity; HIGH if > sprints left",
-            "inputs": {"sprints_left": remaining_sprints},
+            "formula": "sprints needed = remaining SP ÷ Σ roster contributors (sp_target × velocity_factor × share of that person's total open SP on this feature); velocity_factor = team velocity ÷ Σ roster sp_target scales the pace to measured velocity (1.0 when velocity unavailable, edge-context decision 0015); non-roster contributors add no velocity; HIGH if > availability-adjusted sprints left (same adjustment as capacity, law 09)",
+            "inputs": {"sprints_left": remaining_sprints, "effective_sprints": effective_sprints,
+                       "velocity_factor": meta.get("timeline_velocity_factor", 1.0)},
             "result": f"{meta['timeline_high_count']} features HIGH",
-            "shown_as": "see appendix timeline table for per-feature values",
+            "shown_as": f"velocity_factor {meta.get('timeline_velocity_factor', 1.0)} — see appendix timeline table for per-feature values",
         },
         {
             "id": "sizing",
@@ -937,28 +1120,28 @@ def build_method(meta, roster, remaining_sprints, hidden, activity_days, window,
         {
             "id": "data_quality",
             "label": "Data-quality gate",
-            "formula": ("per active feature, evaluated in order: no live epics → FAIL; epics but no stories → FAIL; "
-                        "all stories done → PASS; no open unpointed story → PASS; an open Blocker/Critical story without "
-                        "an estimate → WARN; ≥50% of open stories pointed → PASS; ≤2 low-priority unpointed left on a "
-                        "started feature → PASS; otherwise WARN; finally, any PASS that still has an epic with no stories → WARN"),
+            "formula": ("per active feature, evaluated in order: no live epics → FAIL; epics but no issues → FAIL; "
+                        "all issues done → PASS; no open unpointed issue → PASS; an open Blocker/Critical issue without "
+                        "an estimate → WARN; ≥50% of open issues pointed → PASS; ≤2 low-priority unpointed left on a "
+                        "started feature → PASS; otherwise WARN; finally, any PASS that still has an epic with no non-bug stories → WARN"),
             "inputs": {"important_priorities": sorted(IMPORTANT_PRIORITIES),
                        "small_unpointed_remainder": SMALL_UNPOINTED_REMAINDER,
-                       "completion_aware": "done stories are excluded from the pointed ratio"},
+                       "completion_aware": "done issues are excluded from the pointed ratio"},
             "result": f"{meta['dq_pass']} PASS · {meta['dq_warn']} WARN · {meta['dq_fail']} FAIL",
             "shown_as": f"{meta['dq_pass']} PASS · {meta['dq_warn']} WARN · {meta['dq_fail']} FAIL",
         },
         {
             "id": "composite",
             "label": "Composite risk",
-            "formula": "count of signals in {timeline, capacity, assignment, bugs, data quality}; ≥3 HIGH, 2 MEDIUM, ≤1 LOW",
-            "inputs": {"signals_counted": ["timeline", "capacity", "assignment", "bugs", "data_quality"]},
+            "formula": "count of signals in {timeline, assignment, bugs, data quality}; ≥3 HIGH, 2 MEDIUM, ≤1 LOW. Per-person capacity load is shown for context but not counted (feature-level capacity risk is the velocity-based timeline check)",
+            "inputs": {"signals_counted": ["timeline", "assignment", "bugs", "data_quality"]},
             "result": f"{meta['high_risk_count']} HIGH · {meta['medium_risk_count']} MEDIUM · {meta['low_risk_count']} LOW",
             "shown_as": f"{meta['high_risk_count']} HIGH · {meta['medium_risk_count']} MEDIUM · {meta['low_risk_count']} LOW",
         },
         {
             "id": "scope_filter",
             "label": "Excluded from scope",
-            "formula": f"epics that are Dev Complete/Closed, or whose Target/Fix Version is set and is not {version or 'this release'}",
+            "formula": f"epics that are Dev Complete/Testing/Release Pending/Closed, or whose Target/Fix Version is set and is not {version or 'this release'}",
             "inputs": {"version": version},
             "result": f"{meta['excluded_epics_count']} epics, {meta['excluded_open_sp']} SP",
             "shown_as": f"{meta['excluded_epics_count']} epics ({meta['excluded_open_sp']} open SP) left out",
@@ -969,6 +1152,75 @@ def build_method(meta, roster, remaining_sprints, hidden, activity_days, window,
 # --- Main ---
 
 
+def load_velocity(path):
+    """Load velocity.json, tolerating a missing path.
+
+    Returns ``(team_velocity, sprints)``. When ``path`` is None or does not exist
+    we warn and fall back to ``(None, [])`` so capacity uses the roster sum — a
+    missing velocity file must not crash a planning run.
+
+    A measured velocity of 0 (or negative) is treated as *no usable signal* and
+    coerced to ``None`` so capacity and the timeline fall back to the roster sum.
+    A real zero only happens when nothing matched the roster (e.g. live Jira
+    returns display names with null emails, so no assignee/QA Contact resolves to
+    a roster username) — reporting capacity 0 would falsely flag everything as a
+    capacity risk, so we fall back and warn instead.
+    """
+    if not path:
+        return None, []
+    if not os.path.exists(path):
+        print(f"WARNING: velocity file not found ({path}); using roster fallback.", file=sys.stderr)
+        return None, []
+    data = load_json(path)
+    team_velocity = data.get("team_velocity")
+    sprints = data.get("sprints", [])
+    # velocity.json normally carries a number, but tolerate a stringified value
+    # (e.g. "12.5") by coercing it; a non-numeric string is ignored with a warning
+    # rather than crashing the planning run.
+    if isinstance(team_velocity, str):
+        try:
+            team_velocity = float(team_velocity)
+        except ValueError:
+            print(f"WARNING: team_velocity in {path} is not numeric; using roster fallback.",
+                  file=sys.stderr)
+            team_velocity = None
+    if team_velocity is not None and team_velocity <= 0:
+        print("WARNING: measured team velocity is 0 (no issues matched the roster — "
+              "often live Jira returning display names with null emails); using roster "
+              "fallback instead of a degenerate zero capacity.", file=sys.stderr)
+        team_velocity = None
+    return team_velocity, sprints
+
+
+def parse_availability(raw, remaining_sprints):
+    """Normalize the --availability CSV to one fraction per remaining sprint.
+
+    Each value is clamped to [0, 1]. An empty or non-numeric entry is treated as
+    1.0 (fully available) with a warning, rather than dropped — dropping would
+    silently shift every later sprint's availability onto the wrong sprint. A short
+    list is padded with 1.0; a long list is truncated. ``None`` yields all-1.0.
+    """
+    if not raw:
+        return [1.0] * remaining_sprints
+    vals = []
+    for index, part in enumerate(str(raw).split(",")):
+        part = part.strip()
+        if not part:
+            print(f"WARNING: empty availability value at position {index + 1}; treating as 1.0 (fully available).", file=sys.stderr)
+            vals.append(1.0)
+            continue
+        try:
+            vals.append(max(0.0, min(1.0, float(part))))
+        except ValueError:
+            # Do not echo the raw token: --availability is caller-controlled and
+            # may carry sensitive data. Report the position only.
+            print(f"WARNING: non-numeric availability value at position {index + 1}; treating as 1.0 (fully available).", file=sys.stderr)
+            vals.append(1.0)
+    if len(vals) < remaining_sprints:
+        vals += [1.0] * (remaining_sprints - len(vals))
+    return vals[:remaining_sprints]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run planning risk checks")
     parser.add_argument("--features", required=True)
@@ -977,6 +1229,12 @@ def main():
     parser.add_argument("--bugs", required=True)
     parser.add_argument("--roster", required=True)
     parser.add_argument("--remaining-sprints", type=int, required=True)
+    parser.add_argument("--velocity-file", default=None,
+                        help="Optional velocity.json (team_velocity over last 3 closed sprints). "
+                             "When absent or missing, capacity falls back to Σ sp_target × sprints left.")
+    parser.add_argument("--availability", default=None,
+                        help="CSV of per-remaining-sprint availability fractions (0–1) for the "
+                             "PTO/holiday adjustment (law 09). Default: every sprint fully available.")
     parser.add_argument("--component-filter", default="none")
     parser.add_argument("--version", default=None, help="Release version (e.g. 5.1) for scope filtering")
     parser.add_argument("--today", default=None, help="YYYY-MM-DD; enables recent-activity evidence")
@@ -999,6 +1257,12 @@ def main():
     bugs_data = load_json(args.bugs)
     roster = load_json(args.roster)
 
+    # Team velocity (edge-context decision 0015): average completed SP over the last
+    # 3 closed sprints, used to project capacity. Absent/missing → roster-sum fallback.
+    team_velocity, velocity_sprints = load_velocity(args.velocity_file)
+    # Per-remaining-sprint availability for the PTO/holiday adjustment (law 09).
+    availability = parse_availability(args.availability, args.remaining_sprints)
+
     if args.remaining_sprints == 0:
         print("WARNING: 0 sprints remaining — running post-branch-cut.", file=sys.stderr)
 
@@ -1007,6 +1271,11 @@ def main():
     features, unlinked_bugs = build_hierarchy(
         features_data, epics_data, stories_data, bugs_data, args.component_filter, version=args.version
     )
+    # Resolve each story's assignee to its roster username up front (law 00), so every
+    # capacity/timeline/sizing/SPOF lookup groups a teammate's work under one key even
+    # when live Jira returned a display name with a null email (edge-context decision 0015).
+    roster_index = build_roster_index(roster)
+    canonicalize_assignees(features, roster_index)
     # Priority focus: assess Blocker/Critical/Major (plus any in Refinement) and set
     # the rest aside — they go in the appendix and out of every figure.
     in_focus, deprioritized = partition_by_priority(features, focus_priorities, include_lower_when)
@@ -1020,8 +1289,17 @@ def main():
 
     # Risk checks run on active features only; dormant features are a scope decision, not a risk.
     gate = run_data_quality_gate(active)
-    capacity = run_capacity_check(active, gate, roster, args.remaining_sprints)
-    timeline = run_timeline_check(active, gate, roster, args.remaining_sprints)
+    # Availability-adjusted sprints left, so the capacity guideline and timeline risk
+    # both use the same PTO-adjusted cut-line (law 09).
+    effective_sprints = sum(availability)
+    capacity = run_capacity_check(active, gate, roster, args.remaining_sprints,
+                                  effective_sprints=effective_sprints)
+    # Scale the timeline's per-person sp_target pace to measured team velocity so
+    # the per-feature timeline and the capacity figure use the same pace (I.4).
+    timeline_velocity_factor = velocity_scaling_factor(team_velocity, roster)
+    timeline = run_timeline_check(active, gate, roster, args.remaining_sprints,
+                                  velocity_factor=timeline_velocity_factor,
+                                  effective_sprints=effective_sprints)
     assignment = run_assignment_check(active)
     bug_load = run_bug_load_check(unlinked_bugs, all_epic_stories, args.component_filter)
     sizing = run_sizing_check(active, timeline, roster)
@@ -1042,12 +1320,16 @@ def main():
     dq_warn = sum(1 for g in gate if g["status"] == "WARN")
     dq_fail = sum(1 for g in gate if g["status"] == "FAIL")
     total_remaining = sum(t["remaining_sp"] for t in timeline if t["risk"] != "N/A")
-    total_capacity = sum(c["remaining_capacity"] for c in capacity if c["in_roster"])
+    # Team capacity is planned against measured velocity (edge-context decision 0015);
+    # per-person remaining_capacity stays a sp_target-based soft guideline.
+    total_capacity, capacity_basis = team_capacity(
+        team_velocity, roster, args.remaining_sprints, availability=availability)
     gap = total_capacity - total_remaining
     excluded = [e for f in in_focus for e in f.get("excluded_epics", [])]
+    # Bugs count toward open scope like other work (edge-context decision 0003).
     deprioritized_open_sp = sum(
         s["sp"] for f in deprioritized for s in f["all_stories"]
-        if not is_story_done(s) and s["type"] != "Bug"
+        if not is_story_done(s)
     )
 
     overall = "HIGH" if high_count > 0 else ("MEDIUM" if med_count > 0 else "LOW")
@@ -1071,6 +1353,10 @@ def main():
         "overall_risk": overall,
         "total_remaining_sp": total_remaining,
         "total_capacity_sp": total_capacity,
+        "capacity_basis": capacity_basis,
+        "team_velocity": team_velocity,
+        "velocity_sprints": velocity_sprints,
+        "availability": availability,
         "gap_sp": gap,
         "hidden_scope_low": hidden["estimate_low"],
         "hidden_scope_typical": hidden["estimate_typical"],
@@ -1079,10 +1365,14 @@ def main():
         "gap_with_hidden_high": gap - hidden["estimate_low"],
         "total_unpointed_stories": hidden["unpointed_open"],
         "total_unpointed_assigned": hidden["unpointed_assigned"],
-        "overloaded_people_count": sum(1 for c in capacity if c["status"] == "OVER"),
+        # Unpointed open bugs are reported separately, never folded into hidden scope.
+        "unpointed_bugs": hidden["unpointed_bugs"],
+        "unpointed_bug_keys": hidden["unpointed_bug_keys"],
+        "overloaded_people_count": sum(1 for c in capacity if c["status"] in ("ABOVE_GUIDELINE", "OVER")),
         "non_roster_people_count": len(unknown_contributors),
         "spof_features_count": len(assignment["spof"]),
         "timeline_high_count": sum(1 for t in timeline if t["risk"] in ("HIGH", "NO_CONTRIBUTORS")),
+        "timeline_velocity_factor": round(timeline_velocity_factor, 3),
         "undersized_count": sum(1 for s in sizing if s["assessment"] == "Undersized"),
         "unassigned_blocker_bugs": len(bug_load["unassigned_blocker_critical"]),
         "data_quality_failures": unassessable,
@@ -1112,13 +1402,14 @@ def main():
         "scope_confirmation": [
             {"feature_key": f["key"], "summary": f["summary"], "sme": f.get("sme", "None"),
              "status": f["status"], "epic_count": len(f["epics"]),
+             # story_count is a display count of stories (bugs shown via bug-load), not SP math.
              "story_count": sum(1 for s in f["all_stories"] if s["type"] != "Bug"),
              "reason": f["classification_reason"]} for f in dormant
         ],
         "deprioritized": [
             {"feature_key": f["key"], "summary": f["summary"], "priority": f.get("priority", "Undefined"),
              "status": f["status"], "sme": f.get("sme", "None"), "epic_count": len(f["epics"]),
-             "open_sp": sum(s["sp"] for s in f["all_stories"] if not is_story_done(s) and s["type"] != "Bug")}
+             "open_sp": sum(s["sp"] for s in f["all_stories"] if not is_story_done(s))}
             for f in sorted(deprioritized, key=lambda x: x["rank"] if x.get("rank") is not None else float("inf"))
         ],
         "feature_names": {f["key"]: f["summary"] for f in features},

@@ -30,22 +30,26 @@ Substituted by the parent before spawning:
 | Placeholder | Description |
 |---|---|
 | `{WORKDIR}` | Work directory path |
+| `{VELOCITY_DIR}` | Velocity directory path (holds `velocity.json`; empty when velocity was not collected) |
 | `{VERSION}` | OCP release version (e.g., `4.19`, `5.0`) |
 | `{TODAY}` | Today's date in `YYYY-MM-DD` format |
 | `{REFINEMENT_SPRINT_NUM}` | Sprint number of the refinement sprint |
 | `{REFINEMENT_MODE}` | `true` or `false` — when true, produce additional `REFINEMENT_BY_SME` output section |
+| `{AVAILABILITY}` | Per-remaining-sprint PTO/holiday availability CSV (e.g. `1,0.6,1`); empty when not collected — capacity then uses the full `remaining_sprint_count` and is not adjusted for PTO |
 
 ## Instructions
 
 ### 1. Read Context Files
 
 1. `plugins/edge-scrum/.roster.json`
-   Extract: `members` array — use `username` for ownership matching, `sp_target` per member for capacity.
+   Extract: `members` array — use `username` for ownership matching.
    Derive `roster_size` (count of members) and `total_sp_per_sprint` (sum of all `sp_target` values).
+   `total_sp_per_sprint` is the **roster fallback** for capacity, used only when measured velocity is unavailable (decision 0015); it is not the team's capacity.
    If a member is missing `sp_target`, default that member to 8. If the file is absent, halt with an error.
+1a. `{VELOCITY_DIR}/velocity.json` (optional; `{VELOCITY_DIR}` empty when the skill skipped velocity collection) — if present, read `team_velocity` (measured SP/sprint over the last 3 closed sprints). This is the preferred capacity basis; the roster sum is only a fallback.
 2. Load these law files from `plugins/edge-scrum/references/laws/`:
    - `07-workflow-states.md` — done states per issue type
-   - `02-jira-stories.md` — bugs-always-zero-SP rule and story pointing
+   - `02-jira-stories.md` — story pointing (bugs are pointed like other work, decision 0003)
    - `04-jira-epics.md` — epic sizing scales
    - `05-jira-features.md` — feature/initiative sizing scales
    - `01-jira-projects.md` — OCPBUGS components
@@ -79,13 +83,13 @@ Fields per issue:
 
 ```text
 key, summary, status, issuetype, priority, assignee, sprint, labels, updated,
-customfield_10028, customfield_10470, customfield_10021, customfield_10014, issuelinks
+customfield_10028, customfield_10470, customfield_10021, parent, customfield_10014, issuelinks
 ```
 
 Per issue, compute:
 
-- `sp`: `customfield_10028` — **ALWAYS 0 for any Bug issuetype, no exceptions**
-- `epic_key`: `customfield_10014` (or `"No Epic"`)
+- `sp`: `customfield_10028` — `0` if unset; **bugs are pointed like other work (decision 0003)**, so use their actual value
+- `epic_key`: the native `parent` key when the parent is an Epic, else the legacy Epic Link `customfield_10014` (or `"No Epic"`)
 - `flagged`: `customfield_10021` is non-empty
 - `blocked_by`: issuelinks where `type.inward = "is blocked by"` AND blocker status not in {Closed, Verified, Done}
 - `stale`: status in {In Progress, Review} AND `updated` older than 5 business days from `{TODAY}`
@@ -102,7 +106,7 @@ Orphan groups: `(No Feature)`, `(No Epic)`, `(Unlinked Bugs)`.
 - Stories/Tasks/Spikes: Closed
 - OCPEDGE Bugs: Closed
 - OCPBUGS Bugs: Verified, Closed
-- Epics: Closed, Dev Complete
+- Epics: Closed, Dev Complete, Testing, Release Pending
 
 **Per-Epic rollup:**
 
@@ -110,11 +114,11 @@ Orphan groups: `(No Feature)`, `(No Epic)`, `(Unlinked Bugs)`.
 |---|---|
 | `total_issues` | count of all child issues |
 | `done_issues` | issues in done state |
-| `total_sp` | sum of SP (bugs always 0) |
+| `total_sp` | sum of SP (all types, including bugs) |
 | `done_sp` | SP of done issues |
 | `remaining_sp` | SP of non-done issues |
 | `completion_pct` | `done_sp / total_sp × 100`; fallback: `done_issues / total_issues × 100` if total_sp = 0 |
-| `unpointed_count` | non-Bug issues with SP null or 0 |
+| `unpointed_count` | issues with SP null or 0 (bugs included — decision 0003) |
 | `blocked_count` | flagged OR blocked_by non-empty OR "Blocked" in labels |
 | `unassigned_count` | no assignee |
 
@@ -122,8 +126,11 @@ Orphan groups: `(No Feature)`, `(No Epic)`, `(Unlinked Bugs)`.
 
 **Release totals:**
 
-- `total_remaining_sp` = sum of all epics' `remaining_sp`
-- `max_sp_capacity` = `remaining_sprint_count` (from sprints.json) × `total_sp_per_sprint` (from `.roster.json`)
+- `total_remaining_sp` = sum of `remaining_sp` over **in-scope** epics only — **exclude** epics already in a done state (Closed/Dev Complete/Testing/Release Pending, per law 07) and epics whose Target/Fix Version is set to a different release. This matches `run-checks.py`'s capacity scope: a done epic's leftover SP and another release's epics are not demand on this release's remaining capacity, so counting them would inflate `total_remaining_sp` and invent a capacity shortfall. List the excluded epics in the report rather than silently dropping them.
+- `effective_sprint_count`: the availability-adjusted sprints left. If `{AVAILABILITY}` (the per-sprint PTO/holiday CSV collected by the release-health skill) is non-empty, this is Σ of those fractions (e.g. `1,0.6,1 → 2.6`) and `capacity_pto_adjusted = true`; if `{AVAILABILITY}` is empty it equals `remaining_sprint_count` and `capacity_pto_adjusted = false`. **Edge case — guard:** a full `remaining_sprint_count` over-credits capacity when a remaining sprint has known PTO/holidays, which can hide a real capacity shortfall; always use `effective_sprint_count` below, and when `capacity_pto_adjusted = false` the report must state the capacity is **not adjusted for PTO**.
+- `max_sp_capacity` (computed from `effective_sprint_count`, matching `run-checks.py`):
+  - If `velocity.json` was present: `team_velocity × effective_sprint_count`; set `capacity_basis = "velocity"`.
+  - Otherwise: `effective_sprint_count × total_sp_per_sprint`; set `capacity_basis = "roster_fallback"` (state this in the report — it is a fallback, not measured capacity).
 
 ---
 
@@ -151,7 +158,7 @@ If `refinement_sprint_closed = true`, per Feature:
 
 | Condition | Status |
 |---|---|
-| status ∈ {Done, Closed} | ✅ Complete |
+| status ∈ {Done, Closed, Release Pending} | ✅ Complete |
 | 0% complete AND ≤ 2 dev sprints remaining | 🔴 Critical |
 | 0% complete AND ≤ 4 dev sprints remaining | 🟡 At Risk |
 | completion_pct ≥ expected_dev_pct | 🟢 On Track |
@@ -167,7 +174,9 @@ If `refinement_sprint_closed = true`, per Feature:
 - Epic `assignee = "Unassigned"` → 🟡 "No epic DRI"
 - Epic `qa_contact = "None"` AND status ≠ Closed → 🟡 "No epic QA contact"
 
-**7c — Refinement — Spike Rules** (based on `refinement_sprint_closed`):
+**7c — Refinement — Refinement Spike Rules** (based on `refinement_sprint_closed`):
+
+These `spike_*` signals describe the **refinement spike only** — a test plan spike no longer satisfies them (laws 12, 14). The test plan spike is assessed separately below.
 
 Evaluate in this order — first match wins:
 
@@ -180,6 +189,15 @@ Evaluate in this order — first match wins:
 4. If `refinement_sprint_closed = true`:
    - `spike_overdue = true` → 🔴 "Refinement spike not closed — refinement incomplete"
    - `spike_missing` → 🔴 "No refinement spike found; delivery epics may be under-refined"
+
+**7c — Refinement — Test Plan Spike** (law 12 step 3; the QE Lead's spike, assessed independently of the refinement spike):
+
+Skip all test plan checks when `test_plan_check_skipped = true` (the Feature's QA Contact is `unassigned_jira` or `None` — no QE Lead, so no test plan spike is expected). Otherwise:
+
+- `test_plan_spike_missing = true` → 🟡 "No test plan spike — QE Lead ({qa_contact}) must create one that blocks this Feature"
+- `test_plan_spike_overdue = true` (refinement sprint closed AND test plan spike not Closed) → 🟡 "Test plan spike not closed"
+
+A **Closed** test plan spike satisfies the check regardless of its resolution — a deliberate `Won't Do` is a valid skip. Always surface `test_plan_spike_resolution` in the report next to a Closed status (e.g. `Closed (Won't Do)`) so intentional skips are visible.
 
 **7c — Refinement — General:**
 
@@ -234,6 +252,8 @@ Write to `{WORKDIR}/analysis.md` with this exact sentinel structure:
   "features_refined_via_epics": <int>,
   "remaining_sp": <int>,
   "max_sp_capacity": <int>,
+  "capacity_basis": "velocity|roster_fallback",
+  "capacity_pto_adjusted": <bool>,
   "capacity_risk": <bool>,
   "top_risks": ["<concise description>", ...],
   "sprint_recommendation": "<one sentence priority for this sprint>",
@@ -259,6 +279,7 @@ Spike column: ✅ Closed | ✅ Via epics | 🔄 In Progress | ⚠️ Missing | �
 **Type**: {type} | **Status**: {status} | **Health**: {emoji}
 **SME**: {sme} | **QA**: {qa_contact} | **Docs**: {docs_approver}
 **Refinement Spike**: {spike_key — ✅ Closed | ✅ Via epics | 🔄 In Progress | ⚠️ Missing | ⏳ Open}
+**Test Plan Spike**: {test_plan_spike_key — status, appending resolution when Closed (e.g. "Closed (Won't Do)") | ⚠️ Missing | n/a when test_plan_check_skipped}
 **Progress**: {done_sp}/{total_sp} SP ({pct}%) — {done_epics}/{epic_count} epics complete
 **Refinement**: {✅ Has AC | ⚠️ Needs AC} | **Sized**: {✅ | ⚠️ Unsized}
 
@@ -314,7 +335,8 @@ Flag legend: 🚫 Blocked | ⏸️ Parked | ⚠️ Unpointed | 🔴 Flagged | �
 ===SECTION:SPRINT_FORECAST===
 | Sprint | State | Projected SP | Cumulative | Cumulative % | Notes |
 |---|---|---|---|---|---|
-Use `total_sp_per_sprint` (from `.roster.json`) as the default velocity if no completed dev sprints exist.
+Compute each sprint row's **Projected SP** as `team_velocity × availability_i`, where `availability_i` is that sprint's fraction from `{AVAILABILITY}` (the per-sprint PTO/holiday CSV), using `1.0` for any sprint whose availability is absent. Derive **Cumulative** and **Cumulative %** from these availability-adjusted rows so the forecast total matches `max_sp_capacity` (= `team_velocity × effective_sprint_count`) rather than `team_velocity × remaining_sprint_count`. If `velocity.json` is absent, fall back to `total_sp_per_sprint` (from `.roster.json`) as the per-sprint base and note it is a roster fallback, not measured velocity.
+State the capacity line as `max_sp_capacity SP ({capacity_basis}) over effective_sprint_count sprints`; when `capacity_pto_adjusted = false`, append "— not adjusted for PTO".
 Flag if projected completion at branch cut < 85% → add ⚠️ in Notes.
 ===END_SECTION===
 
@@ -368,3 +390,4 @@ No SME assigned — PM needs to assign one before refinement can proceed. {Conti
 4. **Natural language**: Do not use tables for the per-feature descriptions. Write conversational, actionable sentences that an SME can read and act on without opening Jira.
 5. **Docs epics excluded**: In the REFINEMENT_BY_SME section only, skip epics whose summary starts with "Docs" and belong to the OSDOCS project — these are auto-generated and not part of refinement checks. Other sections (REFINEMENT_BACKLOG, standard report sections) are unaffected.
 6. **All gap types apply**: Use the same checks from sections 5b (staffing), 5c (refinement), and 5d (blocked/stalled). The REFINEMENT_BY_SME section is a reorganized view of these existing findings, not a separate analysis.
+7. **Test plan spike gaps**: Include the test plan spike findings from section 7c (missing or not-closed) in each feature's description, naming the **QE Lead** (the Feature's `qa_contact`) as the owner — e.g. "No test plan spike yet — QE Lead Dana needs to create one that blocks this Feature." Omit when `test_plan_check_skipped` (QA Contact is `unassigned_jira`).
