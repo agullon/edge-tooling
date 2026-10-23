@@ -19,7 +19,8 @@ set -euo pipefail
 # --- Config & Defaults ---
 JIRA_BASE_URL="${JIRA_BASE_URL:-https://redhat.atlassian.net}"
 JIRA_BASE_URL="${JIRA_BASE_URL%/}"
-LINK_TYPE_NAME="Blocks"
+LINK_TYPE_NAME="Related"
+CLONE_LINK_TYPE_NAME="Cloners"
 ART_TEMPLATE="ART-11857"
 QE_TEMPLATE="USHIFT-6945"
 QE_PARENT="USHIFT-4531"
@@ -153,6 +154,11 @@ jira() {
     echo "Jira API request failed (HTTP ${code}): ${method} ${safe_path}" >&2
     rm -f "${out}"; return 1
   fi
+  # Some mutations (e.g. POST /issueLink) succeed with 2xx and no body; there is
+  # nothing to parse. Calls that return a body are still parsed as JSON below.
+  if [[ "${method}" != "GET" && ! -s "${out}" ]]; then
+    rm -f "${out}"; return 0
+  fi
   response="$(jq -c . "${out}" 2>/dev/null)" || {
     rm -f "${out}"
     die "Jira API returned invalid JSON: ${method} ${safe_path}"
@@ -221,8 +227,11 @@ log "Starting Phase 1: Preflight checks for MicroShift ${VERSION}..."
 # 1. Validate Link Type semantics
 LINK_TYPES="$(jira GET "/rest/api/3/issueLinkType")" || exit 1
 LINK_TYPE_ID="$(echo "${LINK_TYPES}" | jq -er --arg n "${LINK_TYPE_NAME}" '
-  .issueLinkTypes[] | select(.name == $n and .inward == "is blocked by" and .outward == "blocks") | .id
-')" || die "Link type '${LINK_TYPE_NAME}' (blocks / is blocked by) not found"
+  .issueLinkTypes[] | select(.name == $n and .inward == "is related to" and .outward == "relates to") | .id
+')" || die "Link type '${LINK_TYPE_NAME}' (relates to / is related to) not found"
+CLONE_LINK_TYPE_ID="$(echo "${LINK_TYPES}" | jq -er --arg n "${CLONE_LINK_TYPE_NAME}" '
+  .issueLinkTypes[] | select(.name == $n and .inward == "is cloned by" and .outward == "clones") | .id
+')" || die "Link type '${CLONE_LINK_TYPE_NAME}' (clones / is cloned by) not found"
 
 # 2. Validate Templates & Parent Epic
 ART_TPL_JSON="$(jira GET "/rest/api/3/issue/${ART_TEMPLATE}?fields=description,issuetype,components,priority,project")" || exit 1
@@ -292,16 +301,7 @@ if [[ -z "${EXISTING_QE_KEY}" ]] && ! ${FORCE}; then
   [[ -n "${QE_MATCHES}" ]] && die "Found existing QE ticket(s) missing label '${RELEASE_LABEL}':\n${QE_MATCHES}\nInspect or use --force"
 fi
 
-# 5. Preflight reverse-link check if both exist
-if [[ -n "${EXISTING_ART_KEY}" && -n "${EXISTING_QE_KEY}" ]]; then
-  QE_LINKS="$(jira GET "/rest/api/3/issue/${EXISTING_QE_KEY}?fields=issuelinks")" || exit 1
-  REV_LINK="$(echo "${QE_LINKS}" | jq -r --arg art "${EXISTING_ART_KEY}" --arg lt "${LINK_TYPE_NAME}" '
-    [.fields.issuelinks[]? | select(.type.name == $lt and .outwardIssue.key == $art)] | length
-  ')"
-  [[ "${REV_LINK}" -gt 0 ]] && die "Conflicting reverse link detected: ${EXISTING_QE_KEY} already blocks ${EXISTING_ART_KEY}"
-fi
-
-# 6. Prebuild payloads in preflight
+# 5. Prebuild payloads in preflight
 ART_PAYLOAD=""
 QE_PAYLOAD=""
 if [[ -z "${EXISTING_ART_KEY}" ]]; then
@@ -352,30 +352,45 @@ else
   fi
 fi
 
-# Issue Linking: QE is blocked by ART
-if ${DRY_RUN}; then
-  log "[DRY RUN] Would link: ${QE_KEY} (is blocked by) -> ${ART_KEY} (blocks)"
-else
-  QE_LINKS="$(jira GET "/rest/api/3/issue/${QE_KEY}?fields=issuelinks")" || exit 1
-  ALREADY_LINKED="$(echo "${QE_LINKS}" | jq -r --arg art "${ART_KEY}" --arg lt "${LINK_TYPE_NAME}" '
-    [.fields.issuelinks[]? | select(.type.name == $lt and .inwardIssue.key == $art)] | length
-  ')"
-  if [[ "${ALREADY_LINKED}" -gt 0 ]]; then
-    log "Link verified: ${QE_KEY} is already blocked by ${ART_KEY}"
-  else
-    LINK_PAYLOAD="$(jq -n --arg id "${LINK_TYPE_ID}" --arg art "${ART_KEY}" --arg qe "${QE_KEY}" '{
-      type: {id: $id},
-      inwardIssue: {key: $qe},
-      outwardIssue: {key: $art}
-    }')"
-    jira POST "/rest/api/3/issueLink" "${LINK_PAYLOAD}" >/dev/null || exit 1
-    VERIFY_LINKS="$(jira GET "/rest/api/3/issue/${QE_KEY}?fields=issuelinks")" || exit 1
-    VERIFIED="$(echo "${VERIFY_LINKS}" | jq -r --arg art "${ART_KEY}" --arg lt "${LINK_TYPE_NAME}" '
-      [.fields.issuelinks[]? | select(.type.name == $lt and .inwardIssue.key == $art)] | length
-    ')"
-    [[ "${VERIFIED}" -gt 0 ]] || die "Link created reported success, but readback verification failed"
-    log "Successfully linked: ${QE_KEY} is blocked by ${ART_KEY}"
+# Issue Linking
+# ensure_link <type-name> <type-id> <other-key> <description> <directional: yes|no>
+# Links the QE ticket to <other-key> with the given link type, unless it is already
+# linked, then reads the QE ticket back to verify. In the POST, Jira shows the
+# inwardIssue ticket the OUTWARD wording ("clones", "relates to"), so QE goes first.
+# Readback is from the QE ticket's view: <other-key> is its outwardIssue when QE
+# "clones" it. Related has no direction, so for it accept either side.
+ensure_link() {
+  local type_name="$1" type_id="$2" other="$3" desc="$4" directional="$5" count payload
+  links_to_other() {
+    jira GET "/rest/api/3/issue/${QE_KEY}?fields=issuelinks" | jq -r \
+      --arg o "${other}" --arg lt "${type_name}" --arg dir "${directional}" '
+      [.fields.issuelinks[]? | select(.type.name == $lt and
+        (.outwardIssue.key == $o or ($dir == "no" and .inwardIssue.key == $o)))] | length
+    '
+  }
+  count="$(links_to_other)" || exit 1
+  if [[ "${count}" -gt 0 ]]; then
+    log "Link verified: ${QE_KEY} ${desc} ${other} (already linked)"
+    return
   fi
+  payload="$(jq -n --arg id "${type_id}" --arg o "${other}" --arg qe "${QE_KEY}" '{
+    type: {id: $id},
+    inwardIssue: {key: $qe},
+    outwardIssue: {key: $o}
+  }')"
+  jira POST "/rest/api/3/issueLink" "${payload}" >/dev/null || exit 1
+  count="$(links_to_other)" || exit 1
+  [[ "${count}" -gt 0 ]] || die "Link created reported success, but readback verification failed"
+  log "Successfully linked: ${QE_KEY} ${desc} ${other}"
+}
+
+# QE relates to the ART ticket and clones the QE template.
+if ${DRY_RUN}; then
+  log "[DRY RUN] Would link: ${QE_KEY} (relates to) ${ART_KEY}"
+  log "[DRY RUN] Would link: ${QE_KEY} (clones) ${QE_TEMPLATE}"
+else
+  ensure_link "${LINK_TYPE_NAME}" "${LINK_TYPE_ID}" "${ART_KEY}" "is related to" no
+  ensure_link "${CLONE_LINK_TYPE_NAME}" "${CLONE_LINK_TYPE_ID}" "${QE_TEMPLATE}" "clones" yes
 fi
 
 # Slack Notification

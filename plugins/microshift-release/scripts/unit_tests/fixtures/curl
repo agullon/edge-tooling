@@ -120,22 +120,30 @@ template() {
   }'
 }
 
-# Represent ART blocking the QE issue in a QE issue response.
-desired_links() {
-  local art="${MOCK_ART_KEY}"
+# Represent the QE issue in a QE issue response: related to ART and cloned from
+# the QE template. With "created" only the links POSTed so far are included.
+qe_links() {
+  local art="${MOCK_ART_KEY}" mode="${1:-all}" related=true clone=true inward=false
+  [[ "${MOCK_SCENARIO}" == inward_link ]] && inward=true
   [[ -f "${MOCK_STATE_DIR}/art-key" ]] && art="$(< "${MOCK_STATE_DIR}/art-key")"
-  jq -cn --arg art "${art}" '{fields: {issuelinks: [{
-    type: {name: "Blocks", inward: "is blocked by", outward: "blocks"},
-    inwardIssue: {key: $art}
-  }]}}'
-}
-
-# Represent the conflicting case where QE blocks ART.
-reverse_links() {
-  jq -cn --arg art "${MOCK_ART_KEY}" '{fields: {issuelinks: [{
-    type: {name: "Blocks", inward: "is blocked by", outward: "blocks"},
-    outwardIssue: {key: $art}
-  }]}}'
+  if [[ "${mode}" == created ]]; then
+    [[ -f "${MOCK_STATE_DIR}/link-created-500" ]] || related=false
+    [[ -f "${MOCK_STATE_DIR}/link-created-501" ]] || clone=false
+  fi
+  jq -cn --arg art "${art}" --argjson related "${related}" --argjson clone "${clone}" \
+    --argjson inward "${inward}" '{fields: {issuelinks: (
+    (if $related and $inward then [{
+      type: {name: "Related", inward: "is related to", outward: "relates to"},
+      inwardIssue: {key: $art}
+    }] elif $related then [{
+      type: {name: "Related", inward: "is related to", outward: "relates to"},
+      outwardIssue: {key: $art}
+    }] else [] end) +
+    (if $clone then [{
+      type: {name: "Cloners", inward: "is cloned by", outward: "clones"},
+      outwardIssue: {key: "USHIFT-6945"}
+    }] else [] end)
+  )}}'
 }
 
 case "${path}" in
@@ -147,7 +155,11 @@ case "${path}" in
       respond "$(jq -cn --arg text "${MOCK_SLACK_URL}" '{text: $text}')"
       exit 0
     fi
-    respond '{"issueLinkTypes":[{"id":"500","name":"Blocks","inward":"is blocked by","outward":"blocks"}]}'
+    if [[ "${MOCK_SCENARIO}" == missing_cloners ]]; then
+      respond '{"issueLinkTypes":[{"id":"500","name":"Related","inward":"is related to","outward":"relates to"}]}'
+      exit 0
+    fi
+    respond '{"issueLinkTypes":[{"id":"500","name":"Related","inward":"is related to","outward":"relates to"},{"id":"501","name":"Cloners","inward":"is cloned by","outward":"clones"}]}'
     ;;
   /rest/api/3/issue/ART-11857\?*)
     respond "$(template ART 100)"
@@ -164,13 +176,13 @@ case "${path}" in
     elif [[ "${path}" == *labels* && "${path}" == *ART* ]]; then
       if [[ "${MOCK_SCENARIO}" == "new_success" && "${path}" != *nextPageToken* ]]; then
         respond '{"issues":[],"isLast":false,"nextPageToken":"page-2"}'
-      elif [[ "${MOCK_SCENARIO}" == "reuse_desired" || "${MOCK_SCENARIO}" == "reverse_link" || "${MOCK_SCENARIO}" == "partial" ]]; then
+      elif [[ "${MOCK_SCENARIO}" == "reuse_desired" || "${MOCK_SCENARIO}" == "partial" ]]; then
         respond "$(jq -cn --arg key "${MOCK_ART_KEY}" '{issues: [{key: $key, fields: {issuetype: {id: "100"}, summary: "Create MicroShift zstream for 4.20.7"}}], isLast: true}')"
       else
         respond '{"issues":[],"isLast":true}'
       fi
     elif [[ "${path}" == *labels* && "${path}" == *USHIFT* ]]; then
-      if [[ "${MOCK_SCENARIO}" == "reuse_desired" || "${MOCK_SCENARIO}" == "reverse_link" ]]; then
+      if [[ "${MOCK_SCENARIO}" == "reuse_desired" ]]; then
         respond "$(jq -cn --arg key "${MOCK_QE_KEY}" '{issues: [{key: $key, fields: {issuetype: {id: "200"}, parent: {key: "USHIFT-4531"}, summary: "[QE] 4.20.7 MicroShift Release Testing (Nov 20)"}}], isLast: true}')"
       else
         respond '{"issues":[],"isLast":true}'
@@ -189,16 +201,17 @@ case "${path}" in
     fi
     ;;
   /rest/api/3/issueLink)
-    : > "${MOCK_STATE_DIR}/link-created"
-    respond '{}' 201
+    : > "${MOCK_STATE_DIR}/link-created-$(printf '%s' "${data}" | jq -r '.type.id')"
+    # Jira returns 201 with no body for a created link.
+    respond '' 201
     ;;
   /rest/api/3/issue/*\?fields=issuelinks)
-    if [[ "${MOCK_SCENARIO}" == "reverse_link" ]]; then
-      respond "$(reverse_links)"
-    elif [[ "${MOCK_SCENARIO}" == "reuse_desired" || -f "${MOCK_STATE_DIR}/link-created" ]]; then
-      respond "$(desired_links)"
-    else
+    if [[ "${MOCK_SCENARIO}" == "reuse_desired" ]]; then
+      respond "$(qe_links)"
+    elif [[ "${MOCK_SCENARIO}" == "readback_missing" ]]; then
       respond '{"fields":{"issuelinks":[]}}'
+    else
+      respond "$(qe_links created)"
     fi
     ;;
   *)
