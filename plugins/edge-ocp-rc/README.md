@@ -134,7 +134,7 @@ Before launching, the script verifies:
 
 1. `gangway-cli` is a regular file and executable (skipped for `--dry-run`, `--list`, `--refresh`)
 2. Release image tag exists on quay.io (via REST API)
-3. `MY_APPCI_TOKEN` is set and accepted by the Gangway API (skipped for `--dry-run`)
+3. `MY_APPCI_TOKEN` is set, and the Gangway preflight rejects authentication errors or connection failures (skipped for `--dry-run`). A 2xx response confirms token validation; other HTTP responses produce a warning and leave validation to the actual job submission.
 
 ### Job files and Sippy refresh
 

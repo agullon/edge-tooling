@@ -544,17 +544,23 @@ fi
 
 if ! $DRY_RUN; then
     echo "Verifying token against Gangway API..."
-    HTTP_CODE=$(curl --silent --show-error --connect-timeout 5 --max-time 20 -o /dev/null -w "%{http_code}" \
+    if ! HTTP_CODE=$(curl --silent --show-error --connect-timeout 5 --max-time 20 -o /dev/null -w "%{http_code}" \
         -H "Authorization: Bearer ${MY_APPCI_TOKEN}" \
-        "${GANGWAY_API}/v1/executions/" 2>/dev/null || echo "000")
+        "${GANGWAY_API}/v1/executions/" 2>/dev/null); then
+        echo "Error: cannot reach Gangway API at $GANGWAY_API. Check network/proxy."
+        exit 1
+    fi
     if [[ "$HTTP_CODE" == "401" || "$HTTP_CODE" == "403" ]]; then
         echo "Error: token rejected by Gangway API (HTTP $HTTP_CODE). Refresh MY_APPCI_TOKEN."
         exit 1
     elif [[ "$HTTP_CODE" == "000" ]]; then
         echo "Error: cannot reach Gangway API at $GANGWAY_API. Check network/proxy."
         exit 1
+    elif [[ "$HTTP_CODE" == 2?? ]]; then
+        echo "Token OK (HTTP $HTTP_CODE)"
+    else
+        echo "Warning: Gangway preflight returned HTTP $HTTP_CODE; token validation is inconclusive. Attempting job submission."
     fi
-    echo "Token OK (HTTP $HTTP_CODE)"
     echo ""
 fi
 
