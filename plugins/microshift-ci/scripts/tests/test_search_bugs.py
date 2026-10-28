@@ -6,11 +6,11 @@ Zero-dependency (stdlib unittest + subprocess + tempfile). Run with:
     python3 plugins/microshift-ci/scripts/tests/test_search_bugs.py
 
 The categorization that decides suggest/linked/skip — including whether a CI
-failure is a regression of a closed Jira bug — must be made by this script, not
-by the model. Each case builds a merged-candidates JSON, runs --categorize as a
-subprocess, and asserts the resulting bug-results-*.json. The script self-checks
-its output against _validate_results, so a passing run (exit 0) also proves the
-byte contract consumed by --report is satisfied.
+failure is a regression of a closed Jira bug — is deterministic. Each case
+builds a merged-candidates JSON, runs --categorize as a subprocess, and asserts
+the resulting bug-results-*.json. The script self-checks its output against
+_validate_results, so a passing run (exit 0) also proves the byte contract
+consumed by --report is satisfied.
 """
 
 import importlib.util

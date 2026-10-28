@@ -98,7 +98,7 @@ def build_search_jql_closed_match_keywords(keywords):
 
 
 def build_search_jql_open_all():
-    """Build the legacy AI-generated open-bug inventory query."""
+    """Build the open AI-generated bug inventory query."""
     return ('project = USHIFT AND issuetype = Bug '
             'AND labels = "microshift-ci-ai-generated" '
             'AND status not in (Closed, Verified) ORDER BY updated DESC')
@@ -249,7 +249,7 @@ def find_jira_bugs_for_source(candidates_data, search_fn=None,
         "candidates": result_candidates,
     }
 
-    # Query the legacy labeled inventory once, on the first source.
+    # Query the labeled open-bug inventory once, on the first source.
     if include_open_bugs:
         jql = build_search_jql_open_all()
         issues = search_all_fn(
@@ -938,8 +938,7 @@ def main_report(report_file, candidates_file, workdir):
 # ---------------------------------------------------------------------------
 #
 # The suggest/linked/skip decision — including whether a failure is a
-# regression of a closed Jira bug — is made here in code, NOT by the model.
-# This module is the source of truth for the decision policy: the rules and
+# regression of a closed Jira bug — is deterministic. This module is the source of truth for the decision policy: the rules and
 # reason strings in categorize_candidate() below are enforced by
 # scripts/tests/test_search_bugs.py. The decisions are consumed by the
 # --report text stage (bug-search-*.txt) and by downstream skills reading
