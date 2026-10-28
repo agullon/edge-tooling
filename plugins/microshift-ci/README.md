@@ -60,8 +60,9 @@ suggestions for unmatched ones. The suggest/linked/skip decisions are written
 to `<WORKDIR>/bugs/bug-search-<release>.txt` when one release is analyzed, or
 to `<WORKDIR>/report-bug-search.txt` when several releases are analyzed. Bugs
 are filed manually via the prefilled "Create Bug in JIRA" buttons in the HTML
-report. The buttons appear for every issue and are not filtered by those
-decisions.
+report. The buttons follow the categorization decisions: they appear only for
+failures categorized as `suggest`; `linked` and `skipped` failures show their
+decision instead.
 
 ## Requirements
 

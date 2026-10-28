@@ -941,9 +941,10 @@ def main_report(report_file, candidates_file, workdir):
 # regression of a closed Jira bug — is deterministic. This module is the source of truth for the decision policy: the rules and
 # reason strings in categorize_candidate() below are enforced by
 # scripts/tests/test_search_bugs.py. The decisions are consumed by the
-# --report text stage (bug-search-*.txt) and by downstream skills reading
-# bug-results-*.json; the HTML report (plugins/shared create-report.py)
-# renders raw bug-matches-*.json only and does not apply this policy.
+# --report text stage (bug-search-*.txt), by downstream skills reading
+# bug-results-*.json, and by the HTML report (plugins/shared
+# create-report.py), which renders each decision next to the failure and
+# offers the Create Bug button only for suggest decisions.
 
 REASON_INFRASTRUCTURE = "Infrastructure failure — not a product bug"
 REASON_NO_BUGS = "No existing bugs found — suggest filing a new bug"
