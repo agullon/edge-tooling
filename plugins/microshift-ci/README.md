@@ -56,10 +56,12 @@ python3 plugins/microshift-ci/scripts/run-doctor.py \
 ```
 
 Searches JIRA for pre-existing bugs matching CI failures and drafts ticket
-suggestions for unmatched ones; the suggest/linked/skip decisions are written
-to `bugs/bug-search-*.txt` in the workdir. Bugs are filed manually via the
-prefilled "Create Bug in JIRA" buttons in the HTML report — the buttons
-appear for every issue and are not filtered by those decisions.
+suggestions for unmatched ones. The suggest/linked/skip decisions are written
+to `<WORKDIR>/bugs/bug-search-<release>.txt` when one release is analyzed, or
+to `<WORKDIR>/report-bug-search.txt` when several releases are analyzed. Bugs
+are filed manually via the prefilled "Create Bug in JIRA" buttons in the HTML
+report. The buttons appear for every issue and are not filtered by those
+decisions.
 
 ## Requirements
 

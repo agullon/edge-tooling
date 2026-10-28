@@ -1021,8 +1021,6 @@ class DoctorPipeline:
                         release = "PRs"
                     else:
                         release = rest.split("-")[0] if "-" in rest else rest
-                # bugs.log is deterministic (search-bugs.py subprocess), no cost tracking needed
-
                 if stage not in costs["stages"]:
                     costs["stages"][stage] = {
                         "releases": {},
