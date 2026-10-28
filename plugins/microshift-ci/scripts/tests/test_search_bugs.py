@@ -16,6 +16,7 @@ byte contract consumed by --report is satisfied.
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -93,6 +94,21 @@ def categorize(candidates, sources=None):
 def one(candidate):
     """Categorize a single candidate and return its result entry."""
     return categorize([candidate])[0]
+
+
+def make_text_search_fake(issue, matching_text):
+    """Build a search_fn faithful to JQL conjunction semantics.
+
+    Returns *issue* only when every `text ~ "term"` in the JQL occurs in
+    *matching_text* (the issue's searchable text), so conjunctive
+    (multi-keyword) queries behave like real Jira AND-matches.
+    """
+    def fake_search(jql, **kwargs):
+        terms = re.findall(r'text ~ "([^"]*)"', jql)
+        if terms and all(t in matching_text for t in terms):
+            return [issue]
+        return []
+    return fake_search
 
 
 class DecisionPolicyTests(unittest.TestCase):
@@ -185,6 +201,19 @@ class DecisionPolicyTests(unittest.TestCase):
         self.assertEqual(r["action"], "suggest")
         self.assertIn("USHIFT-800", r["reason"])
 
+    def test_regression_partial_missing_finished_dates_is_indeterminate_suggest(self):
+        """A job with an unknown finish date cannot be shown to predate the
+        fix, so a mixed dated/undated candidate must not be skipped as stale."""
+        r = one(_candidate(
+            "mixed dates",
+            regressions=[{"key": "USHIFT-900", "updated": "2026-08-01"}],
+            finished=["2026-07-01", ""],  # one dated before fix, one unknown
+        ))
+        self.assertEqual(r["action"], "suggest")
+        self.assertEqual(r["skip_category"], "")
+        self.assertIn("USHIFT-900", r["reason"])
+        self.assertIn("Potential regression", r["reason"])
+
     def test_one_result_per_candidate_and_signatures_match(self):
         cands = [
             _candidate("a", failure_type="infrastructure"),
@@ -242,6 +271,18 @@ class JiraSearchTests(unittest.TestCase):
         self.assertIn("status in (Closed, Verified)", jql_c)
         self.assertIn('text ~ "greenboot"', jql_c)
 
+        # Conjunctive (compound-evidence) builders AND their terms
+        jql_d = _search_bugs.build_search_jql_open_match_keywords(
+            ["greenboot", "timeout"])
+        self.assertIn("status not in (Closed, Verified)", jql_d)
+        self.assertIn('text ~ "greenboot" AND text ~ "timeout"', jql_d)
+
+        jql_e = _search_bugs.build_search_jql_closed_match_keywords(
+            ["greenboot", "timeout"])
+        self.assertIn("status in (Closed, Verified)", jql_e)
+        self.assertIn('text ~ "greenboot" AND text ~ "timeout"', jql_e)
+        self.assertIn("ORDER BY updated DESC", jql_e)
+
         inventory_jql = _search_bugs.build_search_jql_open_all()
         self.assertIn("project = USHIFT", inventory_jql)
         self.assertIn('labels = "microshift-ci-ai-generated"', inventory_jql)
@@ -298,8 +339,9 @@ class JiraSearchTests(unittest.TestCase):
             "summary": "Unrelated generic timeout", "status": {"name": "New"},
             "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
 
-        def fake_search(jql, **kwargs):
-            return [issue] if 'text ~ "greenboot"' in jql else []
+        # The issue matches only the "timeout" keyword; conjunctive pair
+        # queries must not return it (faithful AND semantics).
+        fake_search = make_text_search_fake(issue, "unrelated generic timeout")
 
         result = _search_bugs.find_jira_bugs_for_candidate(
             {"error_signature": "greenboot health timeout"}, search_fn=fake_search)
@@ -310,9 +352,30 @@ class JiraSearchTests(unittest.TestCase):
             "summary": "Greenboot health timeout", "status": {"name": "New"},
             "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
 
+        fake_search = make_text_search_fake(issue, "greenboot health timeout")
+
+        result = _search_bugs.find_jira_bugs_for_candidate(
+            {"error_signature": "greenboot health timeout"}, search_fn=fake_search)
+        self.assertEqual([d["key"] for d in result["duplicates"]], ["USHIFT-100"])
+
+    def test_compound_match_outside_single_keyword_page_is_accepted(self):
+        """A duplicate matching two keywords is accepted even when it falls
+        outside the first page of a broad single-keyword query (the conjunctive
+        pair query retrieves the compound evidence directly)."""
+        issue = {"key": "USHIFT-100", "fields": {
+            "summary": "Greenboot health timeout", "status": {"name": "New"},
+            "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
+
         def fake_search(jql, **kwargs):
-            if ('text ~ "greenboot"' in jql
-                    or 'text ~ "health"' in jql):
+            terms = re.findall(r'text ~ "([^"]*)"', jql)
+            if terms == ["greenboot"]:
+                # Broad keyword: its first page is full of unrelated issues
+                # and does not include the duplicate.
+                return [{"key": f"USHIFT-{n}", "fields": {
+                    "summary": f"unrelated greenboot issue {n}",
+                    "status": {"name": "New"}, "assignee": None,
+                    "updated": "2026-08-01T00:00:00Z"}} for n in range(5)]
+            if terms and all(t in "greenboot health timeout" for t in terms):
                 return [issue]
             return []
 
@@ -337,19 +400,16 @@ class JiraSearchTests(unittest.TestCase):
             "summary": "Greenboot 68256", "status": {"name": "New"},
             "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
 
-        def bare_only(jql, **kwargs):
-            return [issue] if 'text ~ "68256"' in jql else []
-
         candidate = {"error_signature": "greenboot case 68256 failed"}
+
+        # The issue's text carries the bare test ID but no keyword.
+        bare_only = make_text_search_fake(issue, "68256")
         result = _search_bugs.find_jira_bugs_for_candidate(
             candidate, search_fn=bare_only)
         self.assertEqual(result["duplicates"], [])
 
-        def bare_and_keyword(jql, **kwargs):
-            if 'text ~ "68256"' in jql or 'text ~ "greenboot"' in jql:
-                return [issue]
-            return []
-
+        # The issue's text carries the bare test ID and one keyword.
+        bare_and_keyword = make_text_search_fake(issue, "greenboot 68256")
         result = _search_bugs.find_jira_bugs_for_candidate(
             candidate, search_fn=bare_and_keyword)
         self.assertEqual([d["key"] for d in result["duplicates"]], ["USHIFT-68256"])
@@ -465,6 +525,172 @@ class PipelineFailureTests(unittest.TestCase):
                           proc.stderr)
             self.assertFalse(
                 (Path(workdir) / "bugs" / "bug-matches-4.22.json").exists())
+
+    def _run_pipeline(self, workdir, sources):
+        """Run --pipeline with Jira credentials unset; return the process."""
+        env = dict(os.environ)
+        env.pop("JIRA_USERNAME", None)
+        env.pop("JIRA_API_TOKEN", None)
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--pipeline", sources,
+             "--workdir", workdir],
+            capture_output=True, text=True, env=env,
+        )
+
+    @staticmethod
+    def _write_healthy_release(jobs_dir, release):
+        """Simulate a release the collect stage recorded as failure-free."""
+        (jobs_dir / f"release-{release}-jobs.json").write_text("[]")
+        (jobs_dir / f"release-{release}-status.json").write_text(json.dumps([
+            {"job": "periodic-a", "status": "SUCCESS"},
+            {"job": "periodic-b", "status": "SUCCESS"},
+        ]))
+
+    def test_zero_failure_release_publishes_empty_candidates(self):
+        """A release the collect stage recorded as failure-free prepares an
+        empty candidate set instead of failing the pipeline."""
+        with tempfile.TemporaryDirectory() as workdir:
+            jobs = Path(workdir) / "jobs"
+            jobs.mkdir()
+            self._write_healthy_release(jobs, "4.22")
+
+            proc = self._run_pipeline(workdir, "4.22")
+
+            # Prepare succeeded for the healthy source; the run stopped at
+            # the credentials gate (no Jira access in tests).
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("No failed jobs for release 4.22", proc.stderr)
+            self.assertNotIn("no analysis reports found", proc.stderr)
+            self.assertIn("JIRA_USERNAME and JIRA_API_TOKEN are required",
+                          proc.stderr)
+            candidates = json.loads(
+                (Path(workdir) / "bugs" / "bug-candidates-4.22.json").read_text())
+            self.assertEqual(candidates["candidates"], [])
+
+    def test_zero_failure_rebase_pr_prepares_empty_candidates(self):
+        """All releases and rebase PRs green: every source prepares an empty
+        candidate set and the pipeline proceeds (no 'No candidates prepared'
+        pipeline error)."""
+        with tempfile.TemporaryDirectory() as workdir:
+            jobs = Path(workdir) / "jobs"
+            jobs.mkdir()
+            self._write_healthy_release(jobs, "4.22")
+            (jobs / "prs-status.json").write_text(json.dumps([
+                {"pr_number": 4567, "title": "rebase-release-4.22 onto main",
+                 "url": "http://pr", "passed": 3, "failed": 0, "pending": 0,
+                 "total": 3},
+            ]))
+
+            proc = self._run_pipeline(workdir, "4.22")
+
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("Auto-appended rebase source: rebase-release-4.22",
+                          proc.stderr)
+            self.assertIn("No failed jobs for release 4.22", proc.stderr)
+            self.assertIn("No failed jobs for rebase PR for 4.22", proc.stderr)
+            self.assertNotIn("no analysis reports found", proc.stderr)
+            self.assertIn("JIRA_USERNAME and JIRA_API_TOKEN are required",
+                          proc.stderr)
+            for source in ("4.22", "rebase-release-4.22"):
+                candidates = json.loads(
+                    (Path(workdir) / "bugs" /
+                     f"bug-candidates-{source}.json").read_text())
+                self.assertEqual(candidates["candidates"], [])
+
+    def test_prepare_zero_failure_release_writes_empty_candidates(self):
+        """Standalone prepare mode exits 0 for a confirmed failure-free
+        release and writes an empty candidates file."""
+        with tempfile.TemporaryDirectory() as workdir:
+            jobs = Path(workdir) / "jobs"
+            jobs.mkdir()
+            self._write_healthy_release(jobs, "4.21")
+
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "4.21", "--workdir", workdir],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = Path(workdir) / "bugs" / "bug-candidates-4.21.json"
+            self.assertTrue(out.is_file())
+            data = json.loads(out.read_text())
+            self.assertEqual(data["candidates"], [])
+            self.assertEqual(data["job_files_found"], 0)
+
+    def test_missing_analysis_reports_fail_pipeline(self):
+        """Failures were collected but analysis reports are missing: the
+        pipeline must fail instead of skipping the source and finalizing
+        stale mappings."""
+        with tempfile.TemporaryDirectory() as workdir:
+            jobs = Path(workdir) / "jobs"
+            jobs.mkdir()
+            job = [{
+                "severity": 3,
+                "stack_layer": "test",
+                "step_name": "e2e",
+                "error_signature": "greenboot health timeout",
+                "root_cause": "health check timed out",
+                "raw_error": "timeout",
+                "infrastructure_failure": False,
+                "job_url": "https://prow.example/1",
+                "job_name": "periodic-ci-microshift-release-4.21",
+                "release": "4.21",
+                "remediation": "inspect health check",
+                "finished": "2026-09-01",
+            }]
+            (jobs / "release-4.21-job-0-1.json").write_text(json.dumps(job))
+            # 4.22 recorded failed jobs, but its per-job analysis reports are
+            # absent (e.g. the analysis agents failed).
+            (jobs / "release-4.22-jobs.json").write_text(json.dumps([
+                {"job": "periodic-x", "build_id": "9", "status": "failure"},
+            ]))
+            (jobs / "release-4.22-status.json").write_text(json.dumps([
+                {"job": "periodic-x", "status": "failure"},
+            ]))
+
+            proc = self._run_pipeline(workdir, "4.21,4.22")
+
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("no analysis reports found for release 4.22",
+                          proc.stderr)
+            self.assertNotIn("skipping", proc.stderr)
+            # The failure precedes the search stage: no mapping is published
+            # for any source, so no partial or stale data can be finalized.
+            bugs = Path(workdir) / "bugs"
+            self.assertFalse((bugs / "bug-matches-4.21.json").exists())
+            self.assertFalse((bugs / "bug-matches-4.22.json").exists())
+
+    def test_unknown_release_fails_prepare(self):
+        """A source that cannot be confirmed failure-free (e.g. a mistyped
+        release with an empty status list) is an error, not an empty result."""
+        with tempfile.TemporaryDirectory() as workdir:
+            jobs = Path(workdir) / "jobs"
+            jobs.mkdir()
+            (jobs / "release-9.9-jobs.json").write_text("[]")
+            (jobs / "release-9.9-status.json").write_text("[]")
+
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "9.9", "--workdir", workdir],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("no analysis reports found", proc.stderr)
+
+    def test_collection_error_release_fails_prepare(self):
+        """A release whose data collection failed (error file present) is a
+        genuine preparation failure, not a confirmed zero-failure source."""
+        with tempfile.TemporaryDirectory() as workdir:
+            jobs = Path(workdir) / "jobs"
+            jobs.mkdir()
+            (jobs / "release-4.22-jobs.json").write_text("[]")
+            (jobs / "release-4.22-status.json").write_text("[]")
+            (jobs / "release-4.22-error.txt").write_text("gsutil: boom")
+
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "4.22", "--workdir", workdir],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("no analysis reports found", proc.stderr)
 
 
 if __name__ == "__main__":

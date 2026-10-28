@@ -247,19 +247,32 @@ shared-hypervisor contention.
 ## PCP performance metrics
 
 When `graphs_dir` is provided, it contains JSON files produced by
-`plugins/microshift-ci/scripts/pcp-graphs/generate-graphs.sh`:
+`plugins/microshift-ci/scripts/pcp-graphs/generate-graphs.sh`. Metrics
+are sampled from the PCP archive at 15-second intervals — one data
+point per 15 seconds, not one per second. A series spaced ~15 seconds
+apart is complete, not an evidence gap; scale sample counts by 15
+seconds when estimating durations.
 
-| File | Contents |
-| ---- | ------- |
-| `cpu.json` | Per-second CPU utilization samples |
-| `mem.json` | Memory usage samples (RSS, cache, swap) |
-| `io.json` | Disk I/O samples (throughput, IOPS, await latency) |
-| `disk.json` | Filesystem usage samples (used, available, percent) |
+| File | Keys | Contents |
+| ---- | ---- | ------- |
+| `cpu.json` | `timestamps`, `user`, `sys`, `iowait`, `idle` | CPU utilization in %, normalized so user + sys + iowait + idle = 100 |
+| `mem.json` | `timestamps`, `used_gb`, `cached_gb`, `free_gb`, `total_gb` | Memory in GB; `used_gb` excludes cache so used + cached + free = total |
+| `io.json` | `timestamps`, `bi`, `bo`, `iops`, `await`, `aveq` | Disk I/O: read (`bi`) and write (`bo`) ops/s summed across devices, `iops` = bi + bo, `await` in ms and `aveq` average queue depth, both max across devices |
+| `disk.json` | `timestamps`, `partitions` | Filesystem usage, nested per partition — see below |
 
-Each file is a JSON object with metric names as keys and arrays of
-timestamped samples as values. Correlate timestamps with the failure
-window from `rf-debug.log` or journal entries. Look for sustained
-patterns (4+ consecutive samples above threshold), not isolated spikes —
+Values are parallel arrays, not individually timestamped samples: each
+file has one shared `timestamps` array (`YYYY-MM-DD HH:MM:SS` strings
+in the timezone passed to the graphs step, default UTC) plus one array
+per metric; `metric[i]` is the value at `timestamps[i]`.
+
+`disk.json` nests per-partition data under `partitions`: each entry
+holds static `device`, `mountdir`, and `capacity_gb` fields plus
+`used_pct` and `used_gb` arrays aligned with the shared `timestamps`
+array; a partition with no sample at a timestamp stores `null`.
+
+Correlate `timestamps` with the failure window from `rf-debug.log` or
+journal entries. Look for sustained patterns (4+ consecutive samples
+above threshold — 1+ minutes at this cadence), not isolated spikes —
 a single high `await` value is noise; six consecutive minutes of
 `await > 500ms` is I/O contention.
 

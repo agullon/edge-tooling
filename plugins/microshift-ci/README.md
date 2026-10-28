@@ -13,7 +13,7 @@ Analyze MicroShift CI failures, produce HTML reports, and draft JIRA bug suggest
 
 The full CI doctor pipeline is driven by `run-doctor.py` — a deterministic Python
 script that orchestrates all stages (prepare, graphs, analyze, bugs, finalize).
-LLM agents are used only for per-job root cause analysis and Jira bug correlation.
+LLM agents are used only for per-job root cause analysis.
 
 ```bash
 python3 plugins/microshift-ci/scripts/run-doctor.py \
@@ -56,14 +56,17 @@ python3 plugins/microshift-ci/scripts/run-doctor.py \
 ```
 
 Searches JIRA for pre-existing bugs matching CI failures and drafts ticket
-suggestions for unmatched ones. Bugs are filed manually via the prefilled
-"Create Bug in JIRA" buttons in the HTML report.
+suggestions for unmatched ones; the suggest/linked/skip decisions are written
+to `bugs/bug-search-*.txt` in the workdir. Bugs are filed manually via the
+prefilled "Create Bug in JIRA" buttons in the HTML report — the buttons
+appear for every issue and are not filtered by those decisions.
 
 ## Requirements
 
 - `gsutil` CLI (uses anonymous access on public GCS buckets)
 - `gh` CLI (authenticated with access to openshift/microshift)
-- Jira MCP server configured (for bug correlation)
+- `JIRA_USERNAME` and `JIRA_API_TOKEN` environment variables (Jira REST API credentials for bug correlation)
+- Jira MCP server configured (only for `/microshift-ci:close-stale-bugs` `--close` mode)
 - Python 3
 - `pcp-export-pcp2json` (for PCP performance graphs)
 - `matplotlib` Python package (for PCP graph plotting)

@@ -8,6 +8,7 @@ import os
 import re
 import glob as glob_mod
 from datetime import datetime, timezone
+from itertools import combinations
 
 import jira_search
 from classify import classify_breakdown
@@ -69,6 +70,12 @@ def build_search_jql_open_match_keyword(keyword):
     return f'{_JIRA_SCOPE} AND text ~ "{keyword}" AND status not in (Closed, Verified)'
 
 
+def build_search_jql_open_match_keywords(keywords):
+    """Build JQL for open bugs matching ALL keywords (compound evidence)."""
+    terms = " AND ".join(f'text ~ "{kw}"' for kw in keywords)
+    return f'{_JIRA_SCOPE} AND {terms} AND status not in (Closed, Verified)'
+
+
 def build_search_jql_open_match_test_id(test_id, ocp_prefixed=False):
     """Build JQL for open bugs matching test ID (bare or OCP-prefixed, for duplicate detection)."""
     if ocp_prefixed:
@@ -81,6 +88,13 @@ def build_search_jql_open_match_test_id(test_id, ocp_prefixed=False):
 def build_search_jql_closed_match_keyword(keyword):
     """Build JQL for closed/verified bugs matching keyword (for regression detection)."""
     return f'{_JIRA_SCOPE} AND text ~ "{keyword}" AND status in (Closed, Verified) ORDER BY updated DESC'
+
+
+def build_search_jql_closed_match_keywords(keywords):
+    """Build JQL for closed/verified bugs matching ALL keywords (compound evidence)."""
+    terms = " AND ".join(f'text ~ "{kw}"' for kw in keywords)
+    return (f'{_JIRA_SCOPE} AND {terms} '
+            f'AND status in (Closed, Verified) ORDER BY updated DESC')
 
 
 def build_search_jql_open_all():
@@ -145,9 +159,19 @@ def find_jira_bugs_for_candidate(cand, search_fn=None):
 
     for kw in keywords[:3]:
         jql = build_search_jql_open_match_keyword(kw)
-        issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=5)
+        issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=50)
         for iss in issues:
             record(open_hits, iss, "keywords", kw)
+
+    # Query compound evidence directly: an issue matching any pair of keywords
+    # satisfies the >=2-keyword acceptance rule even when it falls outside the
+    # first page of a broad single-keyword query.
+    for kw_a, kw_b in combinations(keywords[:3], 2):
+        jql = build_search_jql_open_match_keywords([kw_a, kw_b])
+        issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=50)
+        for iss in issues:
+            record(open_hits, iss, "keywords", kw_a)
+            record(open_hits, iss, "keywords", kw_b)
 
     # Find open bugs by test ID (both bare and OCP-prefixed forms) → potential duplicates
     for tid in test_ids:
@@ -157,13 +181,18 @@ def find_jira_bugs_for_candidate(cand, search_fn=None):
             for iss in issues:
                 record(open_hits, iss, "ocp_ids" if ocp_prefixed else "bare_ids", tid)
 
-    # Find closed bugs by keyword (top 2 keywords) → potential regressions
+    # Find closed bugs by keyword (top 2 keywords) → potential regressions.
+    # Acceptance requires compound evidence (a hit on both keywords), so query
+    # the conjunction directly — a regression cannot be lost to single-keyword
+    # page truncation. With fewer than 2 keywords no closed bug can be
+    # accepted, so no query is needed.
     closed_hits = {}
-    for kw in keywords[:2]:
-        jql = build_search_jql_closed_match_keyword(kw)
-        issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=5)
+    if len(keywords) >= 2:
+        jql = build_search_jql_closed_match_keywords(keywords[:2])
+        issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=50)
         for iss in issues:
-            record(closed_hits, iss, "keywords", kw)
+            record(closed_hits, iss, "keywords", keywords[0])
+            record(closed_hits, iss, "keywords", keywords[1])
 
     def accepted(hits):
         result = []
@@ -387,6 +416,59 @@ def find_job_files(workdir, source):
         return files, f"rebase PR for {release}"
 
     return [], source
+
+
+def _confirmed_no_failures(workdir, source):
+    """Return True when the collect stage recorded zero failed jobs for this
+    source, distinguishing a healthy source from one with missing reports.
+
+    doctor-helper.sh writes jobs/release-<source>-status.json (every periodic
+    job for a release, pass and fail) and jobs/prs-status.json (per-PR job
+    counts). A release with no failed jobs has a non-empty, failure-free
+    status file and no release-<source>-error.txt; a mistyped release or a
+    failed collection yields an empty status list (plus the error file on
+    collection failure) and is NOT treated as healthy. PR and rebase sources
+    are healthy when every matching entry in prs-status.json has zero failed
+    jobs.
+    """
+    jobs_dir = os.path.join(workdir, "jobs")
+
+    def _load_json(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    if re.match(r"^(\d+\.\d+|main)$", source):
+        if os.path.exists(os.path.join(jobs_dir, f"release-{source}-error.txt")):
+            return False
+        statuses = _load_json(
+            os.path.join(jobs_dir, f"release-{source}-status.json"))
+        return (isinstance(statuses, list) and len(statuses) > 0
+                and all(isinstance(s, dict) and s.get("status") != "failure"
+                        for s in statuses))
+
+    pr_num = None
+    title_fragment = None
+    m = re.match(r"^pr-?(\d+)$", source)
+    if m:
+        pr_num = int(m.group(1))
+    else:
+        m = re.match(r"^rebase-release-(.+)$", source)
+        if not m:
+            return False
+        title_fragment = f"rebase-release-{m.group(1)}"
+
+    pr_statuses = _load_json(os.path.join(jobs_dir, "prs-status.json"))
+    if not isinstance(pr_statuses, list):
+        return False
+    matched = [
+        p for p in pr_statuses
+        if (pr_num is not None and p.get("pr_number") == pr_num)
+        or (title_fragment is not None and title_fragment in p.get("title", ""))
+    ]
+    return bool(matched) and all(p.get("failed", 0) == 0 for p in matched)
 
 
 # ---------------------------------------------------------------------------
@@ -857,8 +939,12 @@ def main_report(report_file, candidates_file, workdir):
 #
 # The suggest/linked/skip decision — including whether a failure is a
 # regression of a closed Jira bug — is made here in code, NOT by the model.
-# Keep the rules and reason strings in sync with the documented policy in
-# skills/find-regressions/SKILL.md (Step 3 Decision Policy).
+# This module is the source of truth for the decision policy: the rules and
+# reason strings in categorize_candidate() below are enforced by
+# scripts/tests/test_search_bugs.py. The decisions are consumed by the
+# --report text stage (bug-search-*.txt) and by downstream skills reading
+# bug-results-*.json; the HTML report (plugins/shared create-report.py)
+# renders raw bug-matches-*.json only and does not apply this policy.
 
 REASON_INFRASTRUCTURE = "Infrastructure failure — not a product bug"
 REASON_NO_BUGS = "No existing bugs found — suggest filing a new bug"
@@ -880,7 +966,7 @@ def _most_recent_regression(regressions):
 def categorize_candidate(candidate):
     """Apply the deterministic decision policy to one merged candidate.
 
-    Rules are applied in order (see SKILL.md Step 3):
+    Rules are applied in order:
 
       1. infrastructure failure                 -> skip / infrastructure
       2. open duplicates                        -> linked (first duplicate)
@@ -898,9 +984,8 @@ def categorize_candidate(candidate):
     failure_type = candidate.get("failure_type", "test")
     duplicates = candidate.get("duplicates") or []
     regressions = candidate.get("regressions") or []
-    finished = [
-        j.get("finished") for j in (candidate.get("jobs") or []) if j.get("finished")
-    ]
+    jobs = candidate.get("jobs") or []
+    finished = [j.get("finished") for j in jobs if j.get("finished")]
 
     # Rule 1: infrastructure failures are transient CI/cloud issues, not bugs.
     if failure_type == "infrastructure":
@@ -927,8 +1012,12 @@ def categorize_candidate(candidate):
         ref_updated = ref.get("updated") or ""
         ref_key = ref.get("key", "")
         # If we cannot establish that every failure predates the fix, treat it
-        # as a potential regression rather than silently skipping.
-        indeterminate = not ref_updated or not finished
+        # as a potential regression rather than silently skipping. 'finished'
+        # above excludes undated jobs, so detect them against the original
+        # jobs list: a job with an unknown finish date must not be assumed to
+        # predate the fix.
+        missing_dates = any(not j.get("finished") for j in jobs)
+        indeterminate = not ref_updated or not jobs or missing_dates
         if indeterminate or any(f > ref_updated for f in finished):
             return {
                 "action": "suggest",
@@ -1041,6 +1130,29 @@ def main_categorize(candidates_file, output_file, workdir):
 # Main entry points (prepare, search, pipeline, and orchestration)
 # ---------------------------------------------------------------------------
 
+def _write_candidates(source, source_label, workdir, found, parsed, skipped,
+                      candidates):
+    """Write bugs/bug-candidates-<source>.json and print it."""
+    result = {
+        "source": source,
+        "source_label": source_label,
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "job_files_found": found,
+        "job_files_parsed": parsed,
+        "job_files_skipped": skipped,
+        "candidates": candidates,
+    }
+
+    bugs_dir = os.path.join(workdir, "bugs")
+    os.makedirs(bugs_dir, exist_ok=True)
+    output_path = os.path.join(bugs_dir, f"bug-candidates-{source}.json")
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"Written: {output_path}", file=sys.stderr)
+    print(json.dumps(result, indent=2))
+
+
 def main_prepare(source, workdir):
     """Entry point for prepare mode: build bug candidates from job files."""
     if not os.path.isdir(workdir):
@@ -1049,8 +1161,17 @@ def main_prepare(source, workdir):
 
     files, source_label = find_job_files(workdir, source)
     if not files:
-        print(f"No job files found for {source_label} in {workdir}", file=sys.stderr)
-        sys.exit(1)
+        if not _confirmed_no_failures(workdir, source):
+            print(f"Error: no analysis reports found for {source_label} in "
+                  f"{workdir}", file=sys.stderr)
+            sys.exit(1)
+        # Healthy source: the collect stage recorded zero failed jobs, so no
+        # per-job analysis reports are expected. Publish an empty candidate
+        # set so the pipeline completes and overwrites any stale mapping.
+        print(f"No failed jobs for {source_label} in {workdir}", file=sys.stderr)
+        _write_candidates(source, source_label, workdir,
+                          found=0, parsed=0, skipped=0, candidates=[])
+        return
 
     print(f"Found {len(files)} job files for {source_label}", file=sys.stderr)
 
@@ -1077,25 +1198,9 @@ def main_prepare(source, workdir):
 
     print(f"Deduplicated to {len(candidates)} bug candidates", file=sys.stderr)
 
-    # Build output
-    result = {
-        "source": source,
-        "source_label": source_label,
-        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "job_files_found": len(files),
-        "job_files_parsed": len(jobs),
-        "job_files_skipped": skipped,
-        "candidates": candidates,
-    }
-
-    bugs_dir = os.path.join(workdir, "bugs")
-    os.makedirs(bugs_dir, exist_ok=True)
-    output_path = os.path.join(bugs_dir, f"bug-candidates-{source}.json")
-    with open(output_path, "w") as f:
-        json.dump(result, f, indent=2)
-
-    print(f"Written: {output_path}", file=sys.stderr)
-    print(json.dumps(result, indent=2))
+    _write_candidates(source, source_label, workdir,
+                      found=len(files), parsed=len(jobs), skipped=skipped,
+                      candidates=candidates)
 
 
 def main_search(source, workdir):
@@ -1157,28 +1262,17 @@ def main_pipeline(sources_str, workdir):
 
     print(f"Pipeline sources: {', '.join(sources)}", file=sys.stderr)
 
-    # Step 1: Prepare fresh candidates for each source.
-    candidate_files = []
+    # Step 1: Prepare fresh candidates for each source. A source whose
+    # analysis reports are missing or invalid is a genuine failure: abort
+    # before publishing any mapping so stale bug-matches-<source>.json files
+    # are never finalized into the HTML report. Sources with confirmed zero
+    # failed jobs succeed with an empty candidate set (see
+    # _confirmed_no_failures).
     active_sources = []
     for source in sources:
         print(f"\n=== Preparing candidates for {source} ===", file=sys.stderr)
-        bugs_dir = os.path.join(workdir, "bugs")
-        candidate_path = os.path.join(bugs_dir, f"bug-candidates-{source}.json")
-
-        try:
-            main_prepare(source, workdir)
-            candidate_files.append(candidate_path)
-            active_sources.append(source)
-        except SystemExit as e:
-            if e.code != 0:
-                print(f"WARNING: Failed to prepare candidates for {source}, skipping", file=sys.stderr)
-                continue
-            candidate_files.append(candidate_path)
-            active_sources.append(source)
-
-    if not candidate_files:
-        print("Error: No candidates prepared", file=sys.stderr)
-        sys.exit(1)
+        main_prepare(source, workdir)
+        active_sources.append(source)
 
     if not jira_search.credentials_available():
         raise jira_search.JiraSearchError(

@@ -1,6 +1,6 @@
 ---
 name: microshift-ci:fix-test-bugs
-argument-hint: <4.22,5.0,main | USHIFT-1234[,USHIFT-5678,...]> [--fix]
+argument-hint: <4.22,5.0,main | USHIFT-1234[,OCPBUGS-5678,...]> [--fix]
 description: Attempt to fix CI bugs by opening PRs in openshift/microshift (dry-run by default)
 user-invocable: true
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent
@@ -14,7 +14,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent
 /microshift-ci:fix-test-bugs 4.22,5.0,main
 /microshift-ci:fix-test-bugs 4.22,5.0,main --fix
 /microshift-ci:fix-test-bugs USHIFT-1234,USHIFT-5678
-/microshift-ci:fix-test-bugs USHIFT-1234 --fix
+/microshift-ci:fix-test-bugs USHIFT-1234,OCPBUGS-5678 --fix
 ```
 
 ## Description
@@ -27,7 +27,7 @@ Operates in **fix mode by default** — shows which groups are eligible and atte
 
 - `<ARGUMENTS>` (required): Must include either releases or explicit bug keys, optionally followed by `--fix`
   - `<releases>` (comma-separated): Release versions (e.g., `4.22,5.0,main`). Selects all candidates from the merged file whose `releases` array includes at least one of the specified versions. Releases are identified by numeric format or the literal `main`.
-  - `<keys>` (comma-separated): One or more USHIFT bug keys (e.g., `USHIFT-1234` or `USHIFT-1234,USHIFT-5678`). Keys match `USHIFT-\d+` pattern.
+  - `<keys>` (comma-separated): One or more Jira bug keys (e.g., `USHIFT-1234` or `USHIFT-1234,OCPBUGS-5678`). Keys match `USHIFT-\d+` or `OCPBUGS-\d+` — the merged candidates file can contain either, because search-bugs.py searches both the USHIFT project and OCPBUGS with the MicroShift component.
   - `--fix` (optional): Attempt fixes. Without this flag, only a dry-run report is produced.
 
 ## Work Directory
@@ -78,9 +78,9 @@ Evaluated in order per **group** (a group is one merged candidate and all its JI
 
 5. Build groups from candidates — each candidate with JIRA keys becomes one group:
    - If **releases** given (e.g., `4.22,5.0`): filter candidates to those whose `releases` array contains at least one of the specified release versions, AND whose `duplicates` array is non-empty. Each matching candidate = one group; the group's keys are the keys from `duplicates`.
-   - If **explicit USHIFT keys**: scan all candidates' `duplicates` arrays to find which candidates contain any of the given keys. Multiple explicit keys mapping to the same candidate form one group. Keys not found in any candidate are an error — report them and stop.
+   - If **explicit Jira keys** (USHIFT- or OCPBUGS-): scan all candidates' `duplicates` arrays to find which candidates contain any of the given keys. Multiple explicit keys mapping to the same candidate form one group. Keys not found in any candidate are an error — report them and stop.
 
-6. For each group, sort the keys by numeric suffix (ascending) and select the **primary key** — the first (lowest-numbered) USHIFT key. Pass the sorted keys to all `fix-test-bugs.sh` commands so the script's first-key extraction matches.
+6. For each group, sort the keys by numeric suffix (ascending) and select the **primary key** — the first (lowest-numbered) key, whatever its project (USHIFT or OCPBUGS). Pass the sorted keys to all `fix-test-bugs.sh` commands so the script's first-key extraction matches.
 
 ### Step 1: Evaluate Eligibility
 
@@ -104,7 +104,7 @@ For each group, show:
 
 ```text
 GROUP N (<count> bugs): [WOULD FIX / SKIPPED]
-  Primary: USHIFT-XXXX: <error_signature>
+  Primary: <primary key>: <error_signature>
   Related: USHIFT-YYYY, USHIFT-ZZZZ
   Releases: 4.20, 4.21, 4.22
   Files: <identified test/ files from error fields>
@@ -148,7 +148,7 @@ Process eligible groups **sequentially** (one at a time — the single working t
 3. **Create branch**:
 
    ```text
-   bash plugins/microshift-ci/scripts/fix-test-bugs.sh branch --workdir <WORKDIR> --jira-keys USHIFT-XXXX,USHIFT-YYYY
+   bash plugins/microshift-ci/scripts/fix-test-bugs.sh branch --workdir <WORKDIR> --jira-keys <KEY1>,<KEY2>
    ```
 
    The branch is named after the primary (first) key.
@@ -165,7 +165,7 @@ Process eligible groups **sequentially** (one at a time — the single working t
 5. **Verify, commit, push, and create PR**:
 
    ```text
-   bash plugins/microshift-ci/scripts/fix-test-bugs.sh submit --workdir <WORKDIR> --jira-keys USHIFT-XXXX,USHIFT-YYYY --summary "<short description>" --rationale "<explanation of why this fix was chosen>"
+   bash plugins/microshift-ci/scripts/fix-test-bugs.sh submit --workdir <WORKDIR> --jira-keys <KEY1>,<KEY2> --summary "<short description>" --rationale "<explanation of why this fix was chosen>"
    ```
 
    The `--rationale` should explain the root cause analysis and why this specific change fixes the problem.
