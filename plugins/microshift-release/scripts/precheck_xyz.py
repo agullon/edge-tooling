@@ -421,7 +421,7 @@ def compute_recommendation(evaluation):
             if labeled:
                 parts.append(f"{labeled} OCPBUGS labeled release-required")
             if inferred:
-                parts.append(f"{inferred} OCPBUGS verified (unlabeled)")
+                parts.append(f"{inferred} OCPBUGS status-derived release-required")
             bug_summary = ", ".join(parts)
             if not ocp_available:
                 return "BLOCKED", f"{bug_summary}{cve_suffix} — waiting for OCP payload"

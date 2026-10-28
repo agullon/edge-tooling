@@ -357,18 +357,19 @@ class TestComponentCveRecommendation(unittest.TestCase):
                     suffix = ("" if ocp_status == "available" else
                               " — waiting for OCP payload")
                     self.assertEqual(reason,
-                                     "1 OCPBUGS verified (unlabeled)" + suffix)
+                                     "1 OCPBUGS status-derived release-required"
+                                     + suffix)
 
     def test_mixed_component_cve_and_labeled_commit_counts(self):
         for labels, required, not_required, reason in (
                 (["release-required"], 2, 0,
                  ("1 OCPBUGS labeled release-required, "
-                  "1 OCPBUGS verified (unlabeled)")),
+                  "1 OCPBUGS status-derived release-required")),
                 (["release-not-required"], 1, 1,
-                 "1 OCPBUGS verified (unlabeled)"),
+                 "1 OCPBUGS status-derived release-required"),
                 (["release-required", "release-not-required"], 2, 0,
                  ("1 OCPBUGS labeled release-required, "
-                  "1 OCPBUGS verified (unlabeled)"))):
+                  "1 OCPBUGS status-derived release-required"))):
             with self.subTest(labels=labels):
                 bugs = self._query_bugs("Verified", commit_labels=labels)
                 self.assertEqual(bugs["release_required"], required)
@@ -456,7 +457,8 @@ class TestOcpbugsReviewReason(unittest.TestCase):
             with self.subTest(status=status):
                 recommendation, reason = self._evaluate_bug(status, "Done")
                 self.assertEqual(recommendation, "ASK ART TO CREATE ARTIFACTS")
-                self.assertEqual(reason, "1 OCPBUGS verified (unlabeled)")
+                self.assertEqual(reason,
+                                 "1 OCPBUGS status-derived release-required")
         recommendation, reason = self._evaluate_bug(
             "Closed", "Done", ocp_status="not_available",
         )
