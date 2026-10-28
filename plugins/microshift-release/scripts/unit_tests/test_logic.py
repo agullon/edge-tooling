@@ -587,8 +587,11 @@ class TestComputeRecommendation(unittest.TestCase):
             "ocpbugs": _ocpbugs(count=1, required=1),
         }
         rec, reason = compute_recommendation(evaluation)
-        self.assertEqual(rec, "NEEDS REVIEW")
-        self.assertIn("OCP payload not yet available", reason)
+        self.assertEqual(rec, "BLOCKED")
+        self.assertEqual(
+            reason,
+            "1 OCPBUGS labeled release-required — waiting for OCP payload",
+        )
 
     def test_cve_takes_priority_over_ocpbugs(self):
         evaluation = {
