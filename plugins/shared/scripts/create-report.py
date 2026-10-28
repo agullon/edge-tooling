@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import math
 import sys
 import os
 import re
@@ -1989,6 +1990,55 @@ _METRIC_FILES = [("cpu.json", "cpu"), ("mem.json", "mem"),
                  ("io.json", "io"), ("disk.json", "disk")]
 
 
+def _sanitize_metric_array(arr):
+    """
+    Sanitize a metric array, replacing non-numeric values with None.
+
+    Returns a sanitized copy of the array where all values are guaranteed
+    to be valid numbers (int or float) or None.
+    """
+    if not isinstance(arr, list):
+        return arr
+
+    sanitized = []
+    changed = False
+    for val in arr:
+        # Exclude booleans from numeric check (isinstance(True, int) is True in Python)
+        # Also exclude non-finite floats (NaN, Infinity, -Infinity)
+        if (isinstance(val, (int, float)) and not isinstance(val, bool)
+                and (not isinstance(val, float) or math.isfinite(val))):
+            sanitized.append(val)
+        else:
+            sanitized.append(None)
+            changed = True
+
+    return sanitized, changed
+
+
+def _sanitize_metrics(metrics_dict):
+    """
+    Sanitize all arrays in a metrics dictionary to ensure valid JSON serialization.
+
+    Replaces any non-numeric values in metric arrays with None (null in JSON).
+    Preserves the 'timestamps' array unchanged as it contains string labels for charts.
+    """
+    if not isinstance(metrics_dict, dict):
+        return metrics_dict
+
+    # Sanitize numeric metric arrays only, preserve timestamps
+    for key, value in metrics_dict.items():
+        if key == 'timestamps':
+            # Skip timestamps - they are string labels for charts
+            continue
+        if isinstance(value, list):
+            sanitized, changed = _sanitize_metric_array(value)
+            if changed:
+                print(f"WARNING: Sanitized corrupted values in metric '{key}'", file=sys.stderr)
+            metrics_dict[key] = sanitized
+
+    return metrics_dict
+
+
 def _load_job_metrics(build_id):
     """Load and cache parsed PCP metric JSON files for a build_id."""
     if build_id in _graph_cache:
@@ -2002,7 +2052,9 @@ def _load_job_metrics(build_id):
                 if os.path.isfile(fpath):
                     try:
                         with open(fpath) as f:
-                            metrics[key] = json.load(f)
+                            raw_metrics = json.load(f)
+                            # Sanitize metrics to handle corrupted values
+                            metrics[key] = _sanitize_metrics(raw_metrics)
                     except (json.JSONDecodeError, IOError) as e:
                         print(f"WARNING: skipping {fpath}: {e}", file=sys.stderr)
     _graph_cache[build_id] = metrics
@@ -2086,7 +2138,7 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
         "diagnostics_text": diagnostics_text,
         "has_chartjs": bool(_CHARTJS_SRC),
     }
-    report_json_str = json.dumps(report_data, default=str, separators=(",", ":"))
+    report_json_str = json.dumps(report_data, default=str, separators=(",", ":"), allow_nan=False)
     safe_report_json = report_json_str.replace("</", "<\\/").replace("<!--", "<\\!--")
 
     chartjs_tags = f'<script>{_CHARTJS_SRC}</script><script>{_PCP_CHARTS_SRC}</script>' if _CHARTJS_SRC else ''
