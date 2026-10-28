@@ -278,12 +278,18 @@ def find_microshift_component_cves(minor, resolved_after=None):
                            key, cve_id, summary[:80])
             continue
 
-        if resolution == "Done" or status == "Verified":
-            release_action = "release_required"
+        # An explicit label always wins, mirroring enrich_ocpbugs.
+        if "release-required" in labels:
+            release_action, release_action_source = "release_required", "label"
+        elif "release-not-required" in labels:
+            release_action, release_action_source = "release_not_required", "label"
+        elif ((status == "Verified" or resolution == "Done")
+                and resolution not in _NON_FIX_RESOLUTIONS):
+            release_action, release_action_source = "release_required", "status"
         elif status in ("New", "Backlog", "In Progress", "ON_QA"):
             continue
         else:
-            release_action = "needs_review"
+            release_action, release_action_source = "needs_review", "status"
 
         all_bugs.append({
             "key": key,
@@ -297,7 +303,7 @@ def find_microshift_component_cves(minor, resolved_after=None):
             "release_note_status": "",
             "labels": labels,
             "release_action": release_action,
-            "release_action_source": "status",
+            "release_action_source": release_action_source,
         })
 
     return all_bugs
