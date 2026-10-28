@@ -305,6 +305,175 @@ class TestInterpretCves(unittest.TestCase):
         self.assertEqual(result["skipped_not_actionable"], 1)
 
 
+class TestComponentCveRecommendation(unittest.TestCase):
+    def _query_bugs(self, status, resolution="", commit_labels=None):
+        from unittest.mock import patch
+
+        component = {
+            "key": "OCPBUGS-12345",
+            "fields": {
+                "summary": "CVE-2026-12345 microshift: vuln",
+                "status": {"name": status},
+                "resolution": {"name": resolution} if resolution else None,
+                "labels": ["SecurityTracking", "pscomponent:microshift",
+                           "CVE-2026-12345"],
+            },
+        }
+        commit_keys = set()
+        search_results = [[component]]
+        if commit_labels is not None:
+            commit_keys.add("OCPBUGS-54321")
+            search_results.insert(0, [{
+                "key": "OCPBUGS-54321",
+                "fields": {
+                    "summary": "Commit-discovered bug",
+                    "status": {"name": "Verified"},
+                    "resolution": None,
+                    "labels": commit_labels,
+                },
+            }])
+        with patch.dict(os.environ, {"JIRA_API_TOKEN": "test-token",
+                                     "JIRA_USERNAME": "test-user"}), \
+                patch("lib.jira_client._jira_search",
+                      side_effect=search_results), \
+                patch("lib.ocpbugs.extract_bugs_from_commits",
+                      return_value=commit_keys):
+            return query_resolved_bugs("4.22.1", branch="release-4.22")
+
+    def test_component_cve_counts_as_status_inferred(self):
+        for status, resolution in (("Verified", ""), ("Closed", "Done"),
+                                   ("MODIFIED", "Done")):
+            for ocp_status, expected in (
+                    ("available", "ASK ART TO CREATE ARTIFACTS"),
+                    ("not_available", "BLOCKED")):
+                with self.subTest(status=status, resolution=resolution,
+                                  ocp_status=ocp_status):
+                    bugs = self._query_bugs(status, resolution)
+                    self.assertEqual(bugs["release_required"], 1)
+                    recommendation, reason = compute_recommendation({
+                        "ocp_status": ocp_status, "ocpbugs": bugs,
+                    })
+                    self.assertEqual(recommendation, expected)
+                    suffix = ("" if ocp_status == "available" else
+                              " — waiting for OCP payload")
+                    self.assertEqual(reason,
+                                     "1 OCPBUGS status-derived release-required"
+                                     + suffix)
+
+    def test_mixed_component_cve_and_labeled_commit_counts(self):
+        for labels, required, not_required, reason in (
+                (["release-required"], 2, 0,
+                 ("1 OCPBUGS labeled release-required, "
+                  "1 OCPBUGS status-derived release-required")),
+                (["release-not-required"], 1, 1,
+                 "1 OCPBUGS status-derived release-required"),
+                (["release-required", "release-not-required"], 2, 0,
+                 ("1 OCPBUGS labeled release-required, "
+                  "1 OCPBUGS status-derived release-required"))):
+            with self.subTest(labels=labels):
+                bugs = self._query_bugs("Verified", commit_labels=labels)
+                self.assertEqual(bugs["release_required"], required)
+                self.assertEqual(bugs["release_not_required"], not_required)
+                self.assertEqual(compute_recommendation({
+                    "ocp_status": "available", "ocpbugs": bugs,
+                }), ("ASK ART TO CREATE ARTIFACTS", reason))
+
+
+class TestOcpbugsReviewReason(unittest.TestCase):
+    def _evaluate_bug(self, status, resolution="", labels=None,
+                      ocp_status="available", pending_cves=False):
+        from unittest.mock import patch
+
+        issue = {
+            "key": "OCPBUGS-12345",
+            "fields": {
+                "summary": "Example bug",
+                "status": {"name": status},
+                "resolution": {"name": resolution} if resolution else None,
+                "labels": labels or [],
+            },
+        }
+        with patch.dict(os.environ, {"JIRA_API_TOKEN": "test-token",
+                                     "JIRA_USERNAME": "test-user"}), \
+                patch("lib.jira_client._jira_search", return_value=[issue]), \
+                patch("lib.jira_client.find_microshift_component_cves",
+                      return_value=[]), \
+                patch("lib.ocpbugs.extract_bugs_from_commits",
+                      return_value={issue["key"]}):
+            bugs = query_resolved_bugs("4.21.16", branch="release-4.21")
+
+        self.assertEqual(bugs["bugs"][0]["resolution"], resolution)
+        impact = {"impact": "none"}
+        if pending_cves:
+            impact = {"impact": "pending_enrichment",
+                      "pending_cve_enrichment": ["CVE-2026-12345"]}
+        return compute_recommendation({
+            "cve_impact": impact, "commits": 5, "days_since": 30,
+            "ocp_status": ocp_status, "ocpbugs": bugs,
+        })
+
+    def test_closed_non_fix_resolutions_need_neutral_review(self):
+        for resolution in ("Not a Bug", "Won't Do", "Won't Fix",
+                           "Cannot Reproduce", "Duplicate", "Obsolete",
+                           "Incomplete"):
+            with self.subTest(resolution=resolution):
+                recommendation, reason = self._evaluate_bug("Closed", resolution)
+                self.assertEqual(recommendation, "NEEDS REVIEW")
+                self.assertEqual(
+                    reason,
+                    f"OCPBUGS-12345 is Closed (resolution: {resolution}) — "
+                    "review release requirements before releasing",
+                )
+
+    def test_other_resolved_record_uses_neutral_review(self):
+        recommendation, reason = self._evaluate_bug("Resolved", "Done")
+        self.assertEqual(recommendation, "NEEDS REVIEW")
+        self.assertIn("is Resolved (resolution: Done)", reason)
+        self.assertIn("review release requirements", reason)
+        self.assertNotIn("not yet verified", reason)
+        self.assertNotIn("resolve or label", reason)
+
+    def test_unresolved_bug_retains_verification_guidance(self):
+        recommendation, reason = self._evaluate_bug("ON_QA")
+        self.assertEqual(recommendation, "NEEDS REVIEW")
+        self.assertEqual(
+            reason, "OCPBUGS-12345 is ON_QA — not yet verified, "
+            "resolve or label it before releasing",
+        )
+
+    def test_explicit_labels_override_non_fix_resolution(self):
+        for label, expected in (
+                ("release-required", "ASK ART TO CREATE ARTIFACTS"),
+                ("release-not-required", "SKIP")):
+            with self.subTest(label=label):
+                recommendation, reason = self._evaluate_bug(
+                    "Closed", "Not a Bug", labels=[label],
+                )
+                self.assertEqual(recommendation, expected)
+                self.assertIn(f"labeled {label}", reason)
+
+    def test_validated_fix_retains_release_recommendation(self):
+        for status in ("Verified", "Closed", "Release Pending"):
+            with self.subTest(status=status):
+                recommendation, reason = self._evaluate_bug(status, "Done")
+                self.assertEqual(recommendation, "ASK ART TO CREATE ARTIFACTS")
+                self.assertEqual(reason,
+                                 "1 OCPBUGS status-derived release-required")
+        recommendation, reason = self._evaluate_bug(
+            "Closed", "Done", ocp_status="not_available",
+        )
+        self.assertEqual(recommendation, "BLOCKED")
+        self.assertIn("waiting for OCP payload", reason)
+
+    def test_resolved_review_retains_pending_cve_suffix(self):
+        recommendation, reason = self._evaluate_bug(
+            "Closed", "Not a Bug", pending_cves=True,
+        )
+        self.assertEqual(recommendation, "NEEDS REVIEW")
+        self.assertIn("resolution: Not a Bug", reason)
+        self.assertTrue(reason.endswith(", 1 advisory CVEs pending enrichment"))
+
+
 class TestComputeRecommendation(unittest.TestCase):
     def test_must_release_cve(self):
         evaluation = {
@@ -493,8 +662,11 @@ class TestComputeRecommendation(unittest.TestCase):
             "ocpbugs": _ocpbugs(count=1, required=1),
         }
         rec, reason = compute_recommendation(evaluation)
-        self.assertEqual(rec, "NEEDS REVIEW")
-        self.assertIn("OCP payload not yet available", reason)
+        self.assertEqual(rec, "BLOCKED")
+        self.assertEqual(
+            reason,
+            "1 OCPBUGS labeled release-required — waiting for OCP payload",
+        )
 
     def test_cve_takes_priority_over_ocpbugs(self):
         evaluation = {

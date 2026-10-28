@@ -62,12 +62,49 @@ class TestEnrichOcpbugs(unittest.TestCase):
 
     @patch("lib.jira_client._jira_search")
     @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
-    def test_no_release_label_needs_review(self, mock_search):
+    def test_unlabeled_verified_infers_release_required(self, mock_search):
         mock_search.return_value = [
             _mock_issue("OCPBUGS-300", "unlabeled bug", "Verified"),
         ]
         result = enrich_ocpbugs(["OCPBUGS-300"])
-        self.assertEqual(result["OCPBUGS-300"]["release_action"], "needs_review")
+        self.assertEqual(result["OCPBUGS-300"]["release_action"],
+                         "release_required")
+        self.assertEqual(result["OCPBUGS-300"]["release_action_source"],
+                         "status")
+
+    @patch("lib.jira_client._jira_search")
+    @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
+    def test_unlabeled_unresolved_needs_review(self, mock_search):
+        mock_search.return_value = [
+            _mock_issue("OCPBUGS-301", "still open", "ON_QA"),
+        ]
+        result = enrich_ocpbugs(["OCPBUGS-301"])
+        self.assertEqual(result["OCPBUGS-301"]["release_action"],
+                         "needs_review")
+
+    @patch("lib.jira_client._jira_search")
+    @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
+    def test_unlabeled_closed_without_fix_needs_review(self, mock_search):
+        mock_search.return_value = [
+            _mock_issue("OCPBUGS-302", "not actually broken", "Closed",
+                        resolution="Not a Bug"),
+        ]
+        result = enrich_ocpbugs(["OCPBUGS-302"])
+        self.assertEqual(result["OCPBUGS-302"]["release_action"],
+                         "needs_review")
+
+    @patch("lib.jira_client._jira_search")
+    @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
+    def test_label_overrides_status_inference(self, mock_search):
+        mock_search.return_value = [
+            _mock_issue("OCPBUGS-303", "verified but not worth shipping",
+                        "Verified", labels=["release-not-required"]),
+        ]
+        result = enrich_ocpbugs(["OCPBUGS-303"])
+        self.assertEqual(result["OCPBUGS-303"]["release_action"],
+                         "release_not_required")
+        self.assertEqual(result["OCPBUGS-303"]["release_action_source"],
+                         "label")
 
     @patch("lib.jira_client._jira_search")
     @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
@@ -142,6 +179,29 @@ class TestSearchCveTickets(unittest.TestCase):
 
 
 class TestFindMicroshiftComponentCves(unittest.TestCase):
+
+    @patch("lib.jira_client._jira_search")
+    @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
+    def test_status_derived_actions_record_source(self, mock_search):
+        for status, resolution, expected in (
+                ("Verified", "", "release_required"),
+                ("Closed", "Done", "release_required"),
+                ("MODIFIED", "Done", "release_required"),
+                ("MODIFIED", "", "needs_review")):
+            with self.subTest(status=status, resolution=resolution):
+                mock_search.return_value = [
+                    _mock_issue("OCPBUGS-800",
+                                "CVE-2026-1111 microshift: vuln", status,
+                                resolution=resolution,
+                                labels=["SecurityTracking",
+                                        "pscomponent:microshift",
+                                        "CVE-2026-1111"]),
+                ]
+                result = find_microshift_component_cves("4.22")
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["release_action"], expected)
+                self.assertEqual(result[0].get("release_action_source"),
+                                 "status")
 
     @patch.dict(os.environ, {"JIRA_API_TOKEN": "", "JIRA_USERNAME": ""})
     def test_no_auth_returns_none(self):
@@ -238,7 +298,53 @@ class TestFindMicroshiftComponentCves(unittest.TestCase):
 
     @patch("lib.jira_client._jira_search")
     @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
-    def test_cve_label_summary_mismatch_skipped(self, mock_search):
+    def test_release_not_required_label_overrides_verified(self, mock_search):
+        mock_search.return_value = [
+            _mock_issue("OCPBUGS-860",
+                        "CVE-2026-7777 openshift4/microshift: vuln",
+                        "Verified",
+                        labels=["SecurityTracking",
+                                "pscomponent:microshift",
+                                "release-not-required",
+                                "CVE-2026-7777"]),
+        ]
+        result = find_microshift_component_cves("4.22")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["release_action"], "release_not_required")
+        self.assertEqual(result[0]["release_action_source"], "label")
+
+    @patch("lib.jira_client._jira_search")
+    @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
+    def test_release_required_label_overrides_early_status(self, mock_search):
+        mock_search.return_value = [
+            _mock_issue("OCPBUGS-870",
+                        "CVE-2026-8888 openshift4/microshift: vuln",
+                        "In Progress",
+                        labels=["SecurityTracking",
+                                "pscomponent:microshift",
+                                "release-required",
+                                "CVE-2026-8888"]),
+        ]
+        result = find_microshift_component_cves("4.22")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["release_action"], "release_required")
+        self.assertEqual(result[0]["release_action_source"], "label")
+
+    @patch("lib.jira_client._jira_search")
+    @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
+    def test_verified_non_fix_resolution_returns_needs_review(self, mock_search):
+        mock_search.return_value = [
+            _mock_issue("OCPBUGS-880",
+                        "CVE-2026-9999 openshift4/microshift: vuln",
+                        "Verified", resolution="Won't Fix",
+                        labels=["SecurityTracking",
+                                "pscomponent:microshift",
+                                "CVE-2026-9999"]),
+        ]
+        result = find_microshift_component_cves("4.22")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["release_action"], "needs_review")
+        self.assertEqual(result[0]["release_action_source"], "status")
         mock_search.return_value = [
             _mock_issue("OCPBUGS-860",
                         "CVE-2026-OTHER openshift4/microshift: wrong bug",
