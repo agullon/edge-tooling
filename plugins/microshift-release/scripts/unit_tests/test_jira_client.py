@@ -180,6 +180,29 @@ class TestSearchCveTickets(unittest.TestCase):
 
 class TestFindMicroshiftComponentCves(unittest.TestCase):
 
+    @patch("lib.jira_client._jira_search")
+    @patch.dict(os.environ, {"JIRA_API_TOKEN": "tok", "JIRA_USERNAME": "user"})
+    def test_status_derived_actions_record_source(self, mock_search):
+        for status, resolution, expected in (
+                ("Verified", "", "release_required"),
+                ("Closed", "Done", "release_required"),
+                ("MODIFIED", "Done", "release_required"),
+                ("MODIFIED", "", "needs_review")):
+            with self.subTest(status=status, resolution=resolution):
+                mock_search.return_value = [
+                    _mock_issue("OCPBUGS-800",
+                                "CVE-2026-1111 microshift: vuln", status,
+                                resolution=resolution,
+                                labels=["SecurityTracking",
+                                        "pscomponent:microshift",
+                                        "CVE-2026-1111"]),
+                ]
+                result = find_microshift_component_cves("4.22")
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["release_action"], expected)
+                self.assertEqual(result[0].get("release_action_source"),
+                                 "status")
+
     @patch.dict(os.environ, {"JIRA_API_TOKEN": "", "JIRA_USERNAME": ""})
     def test_no_auth_returns_none(self):
         result = find_microshift_component_cves("4.22")

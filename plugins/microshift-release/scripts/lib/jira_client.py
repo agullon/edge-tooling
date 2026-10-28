@@ -297,6 +297,7 @@ def find_microshift_component_cves(minor, resolved_after=None):
             "release_note_status": "",
             "labels": labels,
             "release_action": release_action,
+            "release_action_source": "status",
         })
 
     return all_bugs
