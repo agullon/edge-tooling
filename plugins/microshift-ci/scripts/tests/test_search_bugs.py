@@ -383,6 +383,32 @@ class JiraSearchTests(unittest.TestCase):
             {"error_signature": "greenboot health timeout"}, search_fn=fake_search)
         self.assertEqual([d["key"] for d in result["duplicates"]], ["USHIFT-100"])
 
+    def test_bare_id_keyword_match_outside_bare_id_page_is_accepted(self):
+        """A duplicate matching a bare test ID and a keyword is accepted even
+        when it falls outside the first page of the weak bare-ID query (the
+        conjunctive tid+keyword query retrieves the compound evidence
+        directly)."""
+        issue = {"key": "USHIFT-68256", "fields": {
+            "summary": "Greenboot 68256", "status": {"name": "New"},
+            "assignee": None, "updated": "2026-08-01T00:00:00Z"}}
+
+        def fake_search(jql, **kwargs):
+            terms = re.findall(r'text ~ "([^"]*)"', jql)
+            if terms == ["68256"]:
+                # A bare 4-6 digit number is a weak search term: the first
+                # page fills with build/PR-number matches, not the duplicate.
+                return [{"key": f"USHIFT-90{n}", "fields": {
+                    "summary": f"unrelated build 68256 ref {n}",
+                    "status": {"name": "New"}, "assignee": None,
+                    "updated": "2026-08-01T00:00:00Z"}} for n in range(5)]
+            if terms and all(t in "greenboot 68256" for t in terms):
+                return [issue]
+            return []
+
+        result = _search_bugs.find_jira_bugs_for_candidate(
+            {"error_signature": "greenboot case 68256 failed"}, search_fn=fake_search)
+        self.assertEqual([d["key"] for d in result["duplicates"]], ["USHIFT-68256"])
+
     def test_ocp_test_id_hit_is_accepted(self):
         issue = {"key": "OCPBUGS-100", "fields": {
             "summary": "OCP-68256 failed", "status": {"name": "New"},

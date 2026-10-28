@@ -181,6 +181,17 @@ def find_jira_bugs_for_candidate(cand, search_fn=None):
             for iss in issues:
                 record(open_hits, iss, "ocp_ids" if ocp_prefixed else "bare_ids", tid)
 
+    # A bare test ID is accepted only together with a keyword, so query that
+    # combination directly; it cannot be lost to truncation of either the
+    # bare-ID or the single-keyword result page.
+    for tid in test_ids:
+        for kw in keywords[:3]:
+            jql = build_search_jql_open_match_keywords([tid, kw])
+            issues = search_fn(jql, fields="summary,status,assignee,updated", max_results=50)
+            for iss in issues:
+                record(open_hits, iss, "bare_ids", tid)
+                record(open_hits, iss, "keywords", kw)
+
     # Find closed bugs by keyword (top 2 keywords) → potential regressions.
     # Acceptance requires compound evidence (a hit on both keywords), so query
     # the conjunction directly — a regression cannot be lost to single-keyword
