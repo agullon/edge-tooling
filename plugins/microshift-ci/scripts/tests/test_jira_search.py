@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the deterministic Jira REST client."""
 
+import base64
 import errno
 import http.client
 import importlib.util
@@ -42,8 +43,8 @@ class Response:
 
 class JiraSearchClientTests(unittest.TestCase):
     def setUp(self):
-        self.env = mock.patch.dict(
-            os.environ, {"JIRA_USERNAME": "user", "JIRA_API_TOKEN": "token"})
+        self.credentials = {"JIRA_USERNAME": "user", "JIRA_API_TOKEN": "token"}
+        self.env = mock.patch.dict(os.environ, self.credentials)
         self.env.start()
         self.addCleanup(self.env.stop)
         sleep_patcher = mock.patch.object(jira_search.time, "sleep")
@@ -189,11 +190,13 @@ class JiraSearchClientTests(unittest.TestCase):
         self.assertEqual([issue["key"] for issue in issues], ["USHIFT-1", "USHIFT-2"])
         self.assertEqual(self.sleep.call_args_list,
                          [mock.call(1), mock.call(2), mock.call(1), mock.call(2)])
+        credentials = f"{self.credentials['JIRA_USERNAME']}:{self.credentials['JIRA_API_TOKEN']}"
+        expected_auth = "Basic " + base64.b64encode(credentials.encode()).decode()
         for index, call in enumerate(network.call_args_list):
             request = call.args[0]
             self.assertEqual(request.get_method(), "POST")
             self.assertEqual(request.full_url, f"{jira_search._JIRA_API}/search/jql")
-            self.assertEqual(request.get_header("Authorization"), "Basic dXNlcjp0b2tlbg==")
+            self.assertEqual(request.get_header("Authorization"), expected_auth)
             self.assertEqual(request.get_header("Content-type"), "application/json")
             self.assertEqual(request.get_header("Accept"), "application/json")
             expected = {"jql": "project = USHIFT", "fields": ["summary", "status"],
