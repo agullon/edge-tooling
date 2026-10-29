@@ -75,6 +75,23 @@ For every Z-Stream release requested to ART:
     and replace the target version and date in the title if tracking manually)
  1. Go through the steps described in the template ticket, log results, and mark each completed step.
 
+## Unit tests
+
+Run both unit-test suites without VPN access or service credentials.
+
+Requires `jq` and Kerberos development headers/tools (`krb5-config`) to build
+the `gssapi` dependency. On Ubuntu/Debian, install them with
+`sudo apt-get install -y jq libkrb5-dev`.
+
+```shell
+cd plugins/microshift-release/scripts
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements-test.txt
+python3 -m pytest unit_tests/ -q
+bash unit_tests/test_request_art_builds.sh
+```
+
 ## Requirements
 
 - VPN connection (for Brew RPM checks, advisory reports)
