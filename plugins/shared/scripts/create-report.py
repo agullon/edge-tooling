@@ -217,8 +217,9 @@ CSS = """\
 
 JS = """\
 (function() {
+try {
 var D = window.REPORT_DATA;
-if (!D) return;
+if (!D) throw new Error('Report data unavailable');
 var JIRA_BASE = 'https://issues.redhat.com';
 var _gc = 0;
 
@@ -1553,6 +1554,13 @@ function renderAppliedFilter() {
         download(lines.join('\\n'), name, 'text/csv');
     });
 })();
+} catch (error) {
+    var loading = document.getElementById('loading');
+    loading.style.display = 'flex';
+    loading.setAttribute('role', 'alert');
+    loading.textContent = 'Unable to display this report. Report data may be damaged or incomplete. Please retry with a newly generated report.';
+    document.querySelector('.container').style.display = 'none';
+}
 })();"""
 
 
@@ -2060,6 +2068,17 @@ _METRIC_FILES = [("cpu.json", "cpu"), ("mem.json", "mem"),
                  ("io.json", "io"), ("disk.json", "disk")]
 
 
+def _metric_transport(value):
+    """Keep metric numbers readable and valid JSON after substring censoring."""
+    if isinstance(value, dict):
+        return {key: _metric_transport(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_metric_transport(item) for item in value]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value) if not isinstance(value, float) or math.isfinite(value) else None
+    return value
+
+
 def _sanitize_metric_array(arr):
     """
     Sanitize a metric array, replacing non-numeric values with None.
@@ -2174,6 +2193,8 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
                             met = _load_job_metrics(bid)
                             if met:
                                 ajob["metrics"] = met
+                    if "metrics" in ajob:
+                        ajob["metrics"] = _metric_transport(ajob["metrics"])
 
     if pr_data and pr_data.get("prs"):
         for pr_item in pr_data["prs"]:
@@ -2189,6 +2210,8 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
                             met = _load_job_metrics(bid)
                             if met:
                                 ajob["metrics"] = met
+                    if "metrics" in ajob:
+                        ajob["metrics"] = _metric_transport(ajob["metrics"])
 
     # --- Build unified data model for client-side rendering ---
     report_data = {

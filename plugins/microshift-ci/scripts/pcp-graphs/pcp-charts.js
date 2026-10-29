@@ -66,8 +66,22 @@ var pcpCharts = (function() {
         card.appendChild(row);
     }
 
-    function peak(arr) { return arr.length ? Math.max.apply(null, arr) : 0; }
-    function avg(arr) { return arr.length ? arr.reduce(function(a, b) { return a + b; }, 0) / arr.length : 0; }
+    function samples(arr) {
+        return arr.map(function(value) {
+            if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) return null;
+            var number = Number(value);
+            return Number.isFinite(number) ? number : null;
+        });
+    }
+
+    function peak(arr) {
+        var valid = arr.filter(function(value) { return value !== null; });
+        return valid.length ? Math.max.apply(null, valid) : 0;
+    }
+    function avg(arr) {
+        var valid = arr.filter(function(value) { return value !== null; });
+        return valid.length ? valid.reduce(function(total, value) { return total + value; }, 0) / valid.length : 0;
+    }
 
     function lineOpts(yLabel, yMax) {
         return {
@@ -86,6 +100,7 @@ var pcpCharts = (function() {
     }
 
     function renderCpu(grid, d) {
+        d = Object.assign({}, d, {user: samples(d.user), sys: samples(d.sys), iowait: samples(d.iowait)});
         var c = makeCard(grid, 'CPU Usage');
         var chart = new Chart(c.canvas, { type: 'line', data: { labels: d.timestamps, datasets: [
             { label: 'User', data: d.user, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', fill: true, pointRadius: 0, borderWidth: 1.5, tension: 0.2, order: 3 },
@@ -97,7 +112,9 @@ var pcpCharts = (function() {
             { label: 'Peak User', value: peak(d.user).toFixed(1) + '%' },
             { label: 'Peak System', value: peak(d.sys).toFixed(1) + '%' },
             { label: 'Peak I/O Wait', value: peak(d.iowait).toFixed(1) + '%' },
-            { label: 'Avg Total', value: avg(d.user.map(function(v, i) { return v + d.sys[i] + d.iowait[i]; })).toFixed(1) + '%' }
+            { label: 'Avg Total', value: avg(d.user.map(function(value, index) {
+                return value === null || d.sys[index] === null || d.iowait[index] === null ? null : value + d.sys[index] + d.iowait[index];
+            })).toFixed(1) + '%' }
         ]);
     }
 
@@ -108,6 +125,7 @@ var pcpCharts = (function() {
     }
 
     function renderMem(grid, d) {
+        d = Object.assign({}, d, {used_gb: samples(d.used_gb), cached_gb: samples(d.cached_gb), total_gb: samples(d.total_gb || [])});
         var c = makeCard(grid, 'Memory Usage');
         var ds = [
             { label: 'Used', data: d.used_gb, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.4)', fill: 'origin', pointRadius: 0, borderWidth: 1.5, tension: 0.2, stack: 'mem', order: 2 },
@@ -116,17 +134,18 @@ var pcpCharts = (function() {
         if (d.total_gb && d.total_gb.length) {
             ds.push({ label: 'Total', data: d.total_gb, borderColor: '#333', backgroundColor: 'transparent', fill: false, pointRadius: 0, borderWidth: 1.5, borderDash: [5, 3], tension: 0, order: 0 });
         }
-        var maxY = d.total_gb && d.total_gb.length ? Math.ceil(Math.max.apply(null, d.total_gb) * 1.1) : undefined;
+        var maxY = peak(d.total_gb) > 0 ? Math.ceil(peak(d.total_gb) * 1.1) : undefined;
         var chart = new Chart(c.canvas, { type: 'line', data: { labels: d.timestamps, datasets: ds }, options: memOpts(maxY) });
         track(chart);
         addStats(c.card, [
             { label: 'Peak Used', value: peak(d.used_gb).toFixed(2) + ' GB' },
             { label: 'Peak Cached', value: peak(d.cached_gb).toFixed(2) + ' GB' },
-            { label: 'Total', value: d.total_gb && d.total_gb.length ? d.total_gb[0].toFixed(2) + ' GB' : '-' }
+            { label: 'Total', value: d.total_gb.length && d.total_gb[0] !== null ? d.total_gb[0].toFixed(2) + ' GB' : '-' }
         ]);
     }
 
     function renderIo(grid, d) {
+        d = Object.assign({}, d, {bi: samples(d.bi), bo: samples(d.bo), await: samples(d.await), aveq: samples(d.aveq)});
         var c1 = makeCard(grid, 'Disk I/O Throughput');
         var chart1 = new Chart(c1.canvas, { type: 'line', data: { labels: d.timestamps, datasets: [
             { label: 'Read', data: d.bi, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', fill: true, pointRadius: 0, borderWidth: 1.5, tension: 0.2 },
@@ -160,6 +179,9 @@ var pcpCharts = (function() {
     }
 
     function renderDisk(grid, d) {
+        d = Object.assign({}, d, {partitions: d.partitions.map(function(partition) {
+            return Object.assign({}, partition, {used_pct: samples(partition.used_pct)});
+        })});
         var c = makeCard(grid, 'Disk Usage');
         var colors = ['#8b5cf6', '#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4', '#84cc16'];
         var datasets = d.partitions.map(function(p, i) {
