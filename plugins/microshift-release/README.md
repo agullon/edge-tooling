@@ -21,6 +21,21 @@ Automate MicroShift Release Testing Activities — from pre-release evaluation t
 | `/microshift-release:advisory-promotion` | Advisory Promotion (Phase 3) | Start in parallel with Phase 1, but wait for Phase 2 to finish before signing off Errata and Shipment | Validate Konflux bootc advisory promotion for QE sign-off — verify advisory YAML, catalog presence, shipment MR, and commit provenance |
 | `/microshift-release:post-release` | Post-Release (Phase 4) | After sign-off in Errata Tool (REL_PREP) and Shipment (approved) | Verify all artifacts and docs are publicly available after shipping — bootc images, RPMs, errata, documentation, and lifecycle page |
 
+## Pre-check decision rules
+
+- Already shipped/non-applicable CVEs are excluded. For the remaining trackers,
+  explicit `release-required` / `release-not-required` labels take precedence.
+- A CVE in `Verified` with an empty resolution needs human review; the report
+  highlights the missing resolution rather than automatically requesting a release.
+- A known release-required fix takes priority over another CVE needing review:
+  recommend `ASK ART` when OCP is available, or `BLOCKED` otherwise, and retain
+  the review warning.
+- Zero MicroShift source commits do not rule out a release: compiler fixes or
+  updated bootc image dependencies can require rebuilding the same source commit.
+  Unknown advisory data or CVEs pending Jira enrichment result in `NEEDS REVIEW`,
+  even without source changes. Use `SKIP` only after assessment finds no
+  release-required fixes or other release gate.
+
 ## How To
 
 ### Request ART to create a new Z-Stream
