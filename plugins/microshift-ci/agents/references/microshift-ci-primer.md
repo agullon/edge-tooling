@@ -244,6 +244,54 @@ simultaneously, CPU/memory/disk contention can cause:
 Report these as infrastructure failures attributed to
 shared-hypervisor contention.
 
+## PCP performance metrics
+
+When `graphs_dir` is provided, it contains JSON files produced by
+`plugins/microshift-ci/scripts/pcp-graphs/generate-graphs.sh`. Metrics
+are sampled from the PCP archive at 15-second intervals — one data
+point per 15 seconds, not one per second. A series spaced ~15 seconds
+apart is complete, not an evidence gap; scale sample counts by 15
+seconds when estimating durations.
+
+| File | Keys | Contents |
+| ---- | ---- | ------- |
+| `cpu.json` | `timestamps`, `user`, `sys`, `iowait`, `idle` | CPU utilization in %, normalized so user + sys + iowait + idle = 100 |
+| `mem.json` | `timestamps`, `used_gb`, `cached_gb`, `free_gb`, `total_gb` | Memory in GB; `used_gb` excludes cache so used + cached + free = total |
+| `io.json` | `timestamps`, `bi`, `bo`, `iops`, `await`, `aveq` | Disk I/O: read (`bi`) and write (`bo`) ops/s summed across devices, `iops` = bi + bo, `await` in ms and `aveq` average queue depth, both max across devices |
+| `disk.json` | `timestamps`, `partitions` | Filesystem usage, nested per partition — see below |
+
+Values are parallel arrays, not individually timestamped samples: each
+file has one shared `timestamps` array (`YYYY-MM-DD HH:MM:SS` strings
+in the timezone passed to the graphs step, default UTC) plus one array
+per metric; `metric[i]` is the value at `timestamps[i]`.
+
+`disk.json` nests per-partition data under `partitions`: each entry
+holds static `device`, `mountdir`, and `capacity_gb` fields plus
+`used_pct` and `used_gb` arrays aligned with the shared `timestamps`
+array; a partition with no sample at a timestamp stores `null`.
+
+Correlate `timestamps` with the failure window from `rf-debug.log` or
+journal entries. Look for sustained patterns (4+ consecutive samples
+above threshold — 1+ minutes at this cadence), not isolated spikes —
+a single high `await` value is noise; six consecutive minutes of
+`await > 500ms` is I/O contention.
+
+## Source correlation
+
+When a MicroShift source checkout is available, use `repo-log.sh` to
+list potentially related commits:
+
+```text
+bash plugins/microshift-ci/scripts/repo-log.sh <SOURCE_DIR> \
+    --since <1_MONTH_BEFORE_FINISHED> \
+    --until <FINISHED_DATE> \
+    --paths test/
+```
+
+Derive `FINISHED_DATE` from `finished.json`. Drop `--paths` to see all
+changes. Name candidate commits in the causal chain when timing and
+touched paths match.
+
 ## Search/index coverage of external tools
 
 - Sippy tracks these jobs at **job level only** — scenario junits and RF

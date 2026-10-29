@@ -46,9 +46,9 @@ JIRA_BASE = "https://issues.redhat.com"
 
 # Per-component settings for the "Create Bug in JIRA" button shown next to
 # every issue for quick manual bug filing. Fields mirror what the component's
-# create-bugs skill would use, so manually filed bugs stay trackable by the
-# existing tooling (Bugs tab query, close-stale-bugs). Components without an
-# entry get no button.
+# bug search would use (search-bugs.py --pipeline), so manually filed bugs stay
+# trackable by the existing tooling (Bugs tab query, close-stale-bugs). Components
+# without an entry get no button.
 COMPONENT_JIRA_CREATE = {
     "microshift": {
         "pid": "10417",
@@ -111,6 +111,7 @@ CSS = """\
         .bug-tag-open { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
         .bug-tag-regression { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .create-bug-btn { background: #198754; color: #fff; border: 1px solid #157347; }
+        .decision-skip { background: #e2e3e5; color: #383d41; border: 1px solid #d6d8db; }
         .no-bugs { color: #6c757d; font-style: italic; font-size: 0.85em; }
         .toc { background: white; border-radius: 8px; padding: 15px; margin: 15px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         .toc ul { list-style: none; padding-left: 0; }
@@ -464,22 +465,47 @@ function createBugUrl(issue, sourceLabel) {
 }
 
 // === Bug links rendering ===
+// Categorization decision (loaded from bug-results-*.json): gates the
+// Create Bug button and is rendered as a badge for linked/skip candidates.
+function renderDecision(decision) {
+    if (decision.action === 'linked' && decision.jira_key) {
+        var a = makeLink(JIRA_BASE + '/browse/' + decision.jira_key,
+            'Linked \\u2192 ' + decision.jira_key, 'bug-tag bug-tag-open', '_blank');
+        a.title = decision.reason || '';
+        return a;
+    }
+    if (decision.action === 'skip') {
+        var label = decision.skip_category === 'infrastructure'
+            ? 'Skipped \\u2014 infrastructure failure'
+            : 'Skipped \\u2014 stale regression';
+        var badge = h('span', 'bug-tag decision-skip', label);
+        badge.title = decision.reason || '';
+        return badge;
+    }
+    return null;
+}
 function renderBugLinks(parent, bugMatch, issue, sourceLabel) {
     var div = h('div', 'bug-links');
-    var url = createBugUrl(issue, sourceLabel);
+    var decision = bugMatch && bugMatch.decision;
+    // The button follows the categorization decision: only suggest (and
+    // uncategorized) candidates offer manual filing; linked and skipped
+    // candidates show their decision instead.
+    var url = (!decision || decision.action === 'suggest') ? createBugUrl(issue, sourceLabel) : null;
     if (url) {
         var btn = makeLink(url, '+ Create Bug in JIRA', 'bug-tag create-bug-btn', '_blank');
         div.appendChild(btn);
     }
+    var decisionBadge = decision ? renderDecision(decision) : null;
+    if (decisionBadge) div.appendChild(decisionBadge);
     var hasDups = bugMatch && bugMatch.duplicates && bugMatch.duplicates.length;
     var hasRegs = bugMatch && bugMatch.regressions && bugMatch.regressions.length;
     if (!hasDups && !hasRegs) {
-        if (url) div.appendChild(document.createElement('br'));
+        if (url || decisionBadge) div.appendChild(document.createElement('br'));
         var nb = h('span', 'no-bugs', 'No tracked bugs');
         div.appendChild(nb);
         parent.appendChild(div); return;
     }
-    if (url) div.appendChild(document.createElement('br'));
+    if (url || decisionBadge) div.appendChild(document.createElement('br'));
     if (hasDups) {
         div.appendChild(h('strong', '', 'Bugs:')); div.appendChild(document.createElement('br'));
         bugMatch.duplicates.forEach(function(d) {
@@ -1571,6 +1597,9 @@ def discover_files(workdir, releases):
     for path in glob_mod.glob(os.path.join(bugs_dir, "bug-matches-rebase-release-*.json")):
         result["prs"]["bugs"].append(path)
 
+    # Categorization decisions (suggest/linked/skip) written by search-bugs.py
+    result["bug_results"] = sorted(glob_mod.glob(os.path.join(bugs_dir, "bug-results-*.json")))
+
     path = os.path.join(jobs_dir, "prs-error.txt")
     if os.path.exists(path):
         with open(path) as f:
@@ -1599,6 +1628,31 @@ def load_bug_candidates(filepath):
     if not data:
         return []
     return data.get("candidates", [])
+
+
+def load_bug_decisions(paths):
+    """Load suggest/linked/skip decisions from search-bugs.py result files.
+
+    Returns {error_signature: {action, jira_key, skip_category, reason}}.
+    Files are processed in name order and the first file containing a
+    signature wins, keeping the mapping stable when result files from
+    several runs are present in the same workdir.
+    """
+    decisions = {}
+    for path in paths:
+        data = load_json(path)
+        if not data:
+            continue
+        for entry in data.get("results", []):
+            signature = entry.get("error_signature", "")
+            if signature and signature not in decisions:
+                decisions[signature] = {
+                    "action": entry.get("action", ""),
+                    "jira_key": entry.get("jira_key", ""),
+                    "skip_category": entry.get("skip_category", ""),
+                    "reason": entry.get("reason", ""),
+                }
+    return decisions
 
 
 def load_open_bugs(filepath):
@@ -1652,6 +1706,22 @@ def match_issue_to_bugs(issue_title, bug_candidates):
     merged["duplicates"] = all_dups
     merged["regressions"] = all_regs
     return merged
+
+
+def _attach_bug_decision(issue, bug_decisions):
+    """Attach the categorization decision to an issue's bug match, if any.
+
+    Decisions are keyed by error_signature; the bug match carries the
+    signature of its top-matching candidate, which is the candidate used
+    for the lookup. Issues without a match (or without a decision) are
+    left unchanged and keep the default suggest affordances.
+    """
+    match = issue.get("bug_match")
+    if not match or "decision" in match or not bug_decisions:
+        return
+    decision = bug_decisions.get(match.get("error_signature", ""))
+    if decision:
+        match["decision"] = decision
 
 
 # ---------------------------------------------------------------------------
@@ -2085,7 +2155,7 @@ def _read_commit_info():
     return info
 
 
-def generate_html(component_title, releases_data, all_bug_candidates, pr_data, pr_status, timestamp, pr_error=None, bugs_tab_data=None, images_tab_data=None, index_data=None, jira_cfg=None, status_data=None, diagnostics_text=None, commit_version="unknown", commit_subject="", commit_date=""):
+def generate_html(component_title, releases_data, all_bug_candidates, pr_data, pr_status, timestamp, pr_error=None, bugs_tab_data=None, images_tab_data=None, index_data=None, jira_cfg=None, status_data=None, diagnostics_text=None, bug_decisions=None, commit_version="unknown", commit_subject="", commit_date=""):
     date_str = timestamp.strftime("%Y-%m-%d")
     time_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2096,6 +2166,7 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
                 if "bug_match" not in iss:
                     iss["bug_match"] = match_issue_to_bugs(
                         iss.get("title", ""), all_bug_candidates)
+                _attach_bug_decision(iss, bug_decisions)
                 for ajob in iss.get("affected_jobs", []):
                     if "metrics" not in ajob:
                         bid = _extract_build_id(ajob.get("url", ""))
@@ -2110,6 +2181,7 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
                 if "bug_match" not in iss:
                     iss["bug_match"] = match_issue_to_bugs(
                         iss.get("title", ""), all_bug_candidates)
+                _attach_bug_decision(iss, bug_decisions)
                 for ajob in iss.get("affected_jobs", []):
                     if "metrics" not in ajob:
                         bid = _extract_build_id(ajob.get("url", ""))
@@ -2287,6 +2359,9 @@ def main():
     else:
         print("  PRs: no data")
 
+    if files["bug_results"]:
+        print(f"  Bug categorization: {len(files['bug_results'])} result file(s)")
+
     if not found_any:
         print(f"\nError: no analysis files found in {workdir}", file=sys.stderr)
         sys.exit(1)
@@ -2404,10 +2479,21 @@ def main():
         except OSError as e:
             print(f"WARNING: could not read {diagnostics_path}: {e}", file=sys.stderr)
 
+    # Load categorization decisions (suggest/linked/skip) from search-bugs.py
+    bug_decisions = load_bug_decisions(files["bug_results"])
+    if ignore_keys:
+        # A linked bug that close-stale-bugs has since closed no longer
+        # tracks the failure; drop the stale decision so the report falls
+        # back to the suggest affordances for that candidate.
+        bug_decisions = {
+            sig: dec for sig, dec in bug_decisions.items()
+            if not (dec["action"] == "linked" and dec["jira_key"] in ignore_keys)
+        }
+
     # Generate HTML
     timestamp = datetime.now(timezone.utc)
     commit_info = _read_commit_info()
-    html_content = generate_html(component_title, releases_data, all_bug_candidates, pr_data, pr_status, timestamp, pr_error, bugs_tab_data, images_tab_data, index_data, COMPONENT_JIRA_CREATE.get(component), status_data=status_data, diagnostics_text=diagnostics_text, commit_version=commit_info["sha"], commit_subject=commit_info["subject"], commit_date=commit_info["date"])
+    html_content = generate_html(component_title, releases_data, all_bug_candidates, pr_data, pr_status, timestamp, pr_error, bugs_tab_data, images_tab_data, index_data, COMPONENT_JIRA_CREATE.get(component), status_data=status_data, diagnostics_text=diagnostics_text, bug_decisions=bug_decisions, commit_version=commit_info["sha"], commit_subject=commit_info["subject"], commit_date=commit_info["date"])
 
     output_path = os.path.join(workdir, f"report-{component}-ci-doctor.html")
     with open(output_path, "w", encoding="utf-8") as f:

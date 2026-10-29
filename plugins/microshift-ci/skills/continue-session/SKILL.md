@@ -16,7 +16,7 @@ allowed-tools: Bash, Read, Glob, Grep
 
 ## Description
 
-Downloads CI Doctor analysis artifacts (per-job reports, summaries, bug mappings, HTML report) from a completed prow job into a local workdir, preserving the source directory structure. The workdir date is derived from the prow job's start timestamp, matching the layout the doctor skill creates. This lets you pick up where the CI agent left off — inspect reports, re-run aggregation, create bugs, or do further investigation.
+Downloads CI Doctor analysis artifacts (per-job reports, summaries, bug mappings, HTML report) from a completed prow job into a local workdir, preserving the source directory structure. The workdir date is derived from the prow job's start timestamp, matching the layout the doctor skill creates. This lets you pick up where the CI agent left off — inspect reports, re-run aggregation, search for regressions and draft bug suggestions, or do further investigation.
 
 ## Arguments
 
@@ -36,8 +36,8 @@ Downloads CI Doctor analysis artifacts (per-job reports, summaries, bug mappings
    - Fails if the workdir already exists (prevents clobbering local data)
    - Downloads analysis files into subdirectories preserving the source structure:
      - `<WORKDIR>/jobs/` — job analysis files (`release-*`, `prs-*`)
-     - `<WORKDIR>/bugs/` — bug correlation files (`bugs-*`, `bug-candidates-*`)
-     - `<WORKDIR>/` — final reports (HTML report, claude logs)
+     - `<WORKDIR>/bugs/` — bug correlation files (`bug-candidates-*`, `bug-matches-*`, `bug-results-*`, plus `bug-search-*.txt` for single-release runs)
+     - `<WORKDIR>/` — final reports (HTML report, claude logs, plus `report-bug-search.txt` for multi-release runs)
    - Outputs a JSON summary to stdout
 
 2. Read the JSON summary. It contains:
@@ -62,12 +62,6 @@ Downloads CI Doctor analysis artifacts (per-job reports, summaries, bug mappings
      ```
 
      where `<RELEASES>` is a comma-separated list of the releases found in the summary.
-
-   - **Create Jira bugs from the analysis**:
-
-     ```text
-     /microshift-ci:create-bugs <VERSION> --create
-     ```
 
    - **Read individual job reports** for deeper investigation:
 
