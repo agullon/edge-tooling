@@ -113,7 +113,7 @@ var pcpCharts = (function() {
             { label: 'Peak System', value: peak(d.sys).toFixed(1) + '%' },
             { label: 'Peak I/O Wait', value: peak(d.iowait).toFixed(1) + '%' },
             { label: 'Avg Total', value: avg(d.user.map(function(value, index) {
-                return value === null || d.sys[index] === null || d.iowait[index] === null ? null : value + d.sys[index] + d.iowait[index];
+                return [value, d.sys[index], d.iowait[index]].every(Number.isFinite) ? value + d.sys[index] + d.iowait[index] : null;
             })).toFixed(1) + '%' }
         ]);
     }
@@ -135,12 +135,13 @@ var pcpCharts = (function() {
             ds.push({ label: 'Total', data: d.total_gb, borderColor: '#333', backgroundColor: 'transparent', fill: false, pointRadius: 0, borderWidth: 1.5, borderDash: [5, 3], tension: 0, order: 0 });
         }
         var maxY = peak(d.total_gb) > 0 ? Math.ceil(peak(d.total_gb) * 1.1) : undefined;
+        var totalGb = d.total_gb.find(Number.isFinite);
         var chart = new Chart(c.canvas, { type: 'line', data: { labels: d.timestamps, datasets: ds }, options: memOpts(maxY) });
         track(chart);
         addStats(c.card, [
             { label: 'Peak Used', value: peak(d.used_gb).toFixed(2) + ' GB' },
             { label: 'Peak Cached', value: peak(d.cached_gb).toFixed(2) + ' GB' },
-            { label: 'Total', value: d.total_gb.length && d.total_gb[0] !== null ? d.total_gb[0].toFixed(2) + ' GB' : '-' }
+            { label: 'Total', value: Number.isFinite(totalGb) ? totalGb.toFixed(2) + ' GB' : '-' }
         ]);
     }
 
