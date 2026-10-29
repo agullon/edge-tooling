@@ -22,10 +22,14 @@ module.exports = function({context, document, renderer, reportHTML}) {
     assert.deepEqual(Array.from(charts[3].data.datasets[1].data), [null, 2]);
     assert.deepEqual(Array.from(charts[0].data.datasets[0].data), [10, 20]);
     for (const chart of charts) {
+        assert.deepEqual(Array.from(chart.data.labels), ['now', 'later']);
         for (const dataset of chart.data.datasets) {
+            assert.equal(dataset.data.length, 2);
             assert(dataset.data.every(value => value === null || typeof value === 'number' && Number.isFinite(value)));
         }
     }
+    assert(grid.children[1].textContent.includes('Peak Used: 2.00 GB'));
+    assert(grid.children[1].textContent.includes('Total: 8.00 GB'));
     assert(!grid.textContent.includes('NaN'));
     metrics.mem.total_gb = ['XXXXXXXX', null];
     metrics.cpu.user = ['', '1XXXX2'];
@@ -36,6 +40,11 @@ module.exports = function({context, document, renderer, reportHTML}) {
     metrics.cpu.user = ['1XXXX2', '20'];
     context.pcpCharts.renderCpu(grid, metrics.cpu);
     assert(grid.children.at(-1).textContent.includes('Avg Total: 23.0%'));
+    const numericCpu = {timestamps: ['now', 'later'], user: [0, -1], sys: [1, 2], iowait: [0, 1]};
+    context.pcpCharts.renderCpu(grid, numericCpu);
+    assert.deepEqual(Array.from(charts.at(-1).data.datasets[0].data), [0, -1]);
+    assert(grid.children.at(-1).textContent.includes('Avg Total: 1.5%'));
+    assert.deepEqual(numericCpu.user, [0, -1]);
     const validData = context.window.REPORT_DATA;
     for (const damaged of [undefined, {releases_data: {'4.20': {issues: [null]}}}]) {
         context.window.REPORT_DATA = damaged;
