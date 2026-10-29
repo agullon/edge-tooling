@@ -21,6 +21,20 @@ module.exports = function({context, document, renderer, reportHTML}) {
     assert.equal(charts.length, 5);
     assert.deepEqual(Array.from(charts[3].data.datasets[1].data), [null, 2]);
     assert.deepEqual(Array.from(charts[0].data.datasets[0].data), [10, 20]);
+    const partitions = metrics.disk.partitions;
+    assert.equal(partitions.length, 2);
+    assert.equal(partitions[0].device, '/dev/sda4');
+    assert.equal(partitions[0].mountdir, '/');
+    assert.equal(partitions[0].capacity_gb, '120.5');
+    assert.deepEqual(Array.from(partitions[0].used_gb), [null, '2.41']);
+    assert.deepEqual(Array.from(partitions[1].used_gb), ['125', null]);
+    assert.deepEqual(Array.from(partitions[0].used_pct), ['0.9XXXXXX999999999', '2']);
+    assert.deepEqual(Array.from(charts[4].data.datasets[0].data), [null, 2]);
+    assert.deepEqual(Array.from(charts[4].data.datasets[1].data), [50, null]);
+    assert.equal(charts[4].data.datasets[0].label, '/dev/sda4 (/) 120.5G');
+    assert.equal(charts[4].data.datasets[1].label, '/dev/sdb1 (/var/lib/containers) 250G');
+    assert(grid.children[4].textContent.includes('Peak /: 2.0%'));
+    assert(grid.children[4].textContent.includes('Peak /var/lib/containers: 50.0%'));
     for (const chart of charts) {
         assert.deepEqual(Array.from(chart.data.labels), ['now', 'later']);
         for (const dataset of chart.data.datasets) {
@@ -31,6 +45,14 @@ module.exports = function({context, document, renderer, reportHTML}) {
     assert(grid.children[1].textContent.includes('Peak Used: 2.00 GB'));
     assert(grid.children[1].textContent.includes('Total: 8.00 GB'));
     assert(!grid.textContent.includes('NaN'));
+    context.pcpCharts.renderDisk(grid, {timestamps: [], partitions: []});
+    assert.equal(charts.at(-1).data.datasets.length, 0);
+    assert.equal(charts.at(-1).data.labels.length, 0);
+    context.pcpCharts.renderDisk(grid, {timestamps: ['now', 'later'], partitions: [
+        {device: '/dev/sdc1', mountdir: '/data', capacity_gb: 100, used_pct: [0, 25]}
+    ]});
+    assert.deepEqual(Array.from(charts.at(-1).data.datasets[0].data), [0, 25]);
+    assert(grid.children.at(-1).textContent.includes('Peak /data: 25.0%'));
     metrics.mem.total_gb = ['XXXXXXXX', null];
     metrics.cpu.user = ['', '1XXXX2'];
     context.pcpCharts.renderMem(grid, metrics.mem);

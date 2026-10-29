@@ -2106,10 +2106,11 @@ def _sanitize_metric_array(arr):
 
 def _sanitize_metrics(metrics_dict):
     """
-    Sanitize all arrays in a metrics dictionary to ensure valid JSON serialization.
+    Sanitize numeric samples, including those in disk partition records.
 
     Replaces any non-numeric values in metric arrays with None (null in JSON).
     Preserves the 'timestamps' array unchanged as it contains string labels for charts.
+    Preserves the 'partitions' records and their scalar device/mount/capacity metadata.
     """
     if not isinstance(metrics_dict, dict):
         return metrics_dict
@@ -2120,6 +2121,9 @@ def _sanitize_metrics(metrics_dict):
             # Skip timestamps - they are string labels for charts
             continue
         if isinstance(value, list):
+            if key == 'partitions':
+                metrics_dict[key] = [_sanitize_metrics(partition) for partition in value]
+                continue
             sanitized, changed = _sanitize_metric_array(value)
             if changed:
                 print(f"WARNING: Sanitized corrupted values in metric '{key}'", file=sys.stderr)
