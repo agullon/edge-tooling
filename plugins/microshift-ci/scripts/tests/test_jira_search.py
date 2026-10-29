@@ -45,13 +45,15 @@ class JiraSearchClientTests(unittest.TestCase):
         self.env = mock.patch.dict(
             os.environ, {"JIRA_USERNAME": "user", "JIRA_API_TOKEN": "token"})
         self.env.start()
-        self.sleep = self.enterContext(mock.patch.object(jira_search.time, "sleep"))
-        self.network = self.enterContext(mock.patch.object(
+        self.addCleanup(self.env.stop)
+        sleep_patcher = mock.patch.object(jira_search.time, "sleep")
+        self.sleep = sleep_patcher.start()
+        self.addCleanup(sleep_patcher.stop)
+        network_patcher = mock.patch.object(
             jira_search.urllib.request, "urlopen",
-            side_effect=AssertionError("Unexpected network request")))
-
-    def tearDown(self):
-        self.env.stop()
+            side_effect=AssertionError("Unexpected network request"))
+        self.network = network_patcher.start()
+        self.addCleanup(network_patcher.stop)
 
     def test_missing_credentials_fails(self):
         with mock.patch.dict(os.environ, {}, clear=True):
