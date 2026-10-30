@@ -7,14 +7,20 @@ JIRA_USERNAME and JIRA_API_TOKEN environment variables.
 """
 
 import base64
+import errno
+import http.client
 import json
 import os
+import socket
+import sys
+import time
 import urllib.error
 import urllib.request
 
-
 _JIRA_BASE = "https://redhat.atlassian.net"
 _JIRA_API = f"{_JIRA_BASE}/rest/api/3"
+_SEARCH_ATTEMPTS = 3
+_SEARCH_RETRY_DELAYS = (1, 2)
 
 
 class JiraSearchError(RuntimeError):
@@ -28,8 +34,23 @@ def credentials_available() -> bool:
     return bool(username and token)
 
 
+def _retryable_transport_error(error) -> bool:
+    """Recognize temporary transport failures, not HTTP or payload errors."""
+    if isinstance(error, urllib.error.URLError):
+        error = error.reason
+    if isinstance(error, socket.gaierror):
+        return error.errno == socket.EAI_AGAIN
+    return isinstance(error, (TimeoutError, http.client.IncompleteRead,
+                              http.client.RemoteDisconnected)) or (
+        isinstance(error, OSError) and error.errno in {
+            errno.ECONNRESET, errno.ECONNABORTED, errno.ECONNREFUSED,
+            errno.ETIMEDOUT, errno.EPIPE,
+        }
+    )
+
+
 def _request(jql: str, fields: str, max_results: int, next_page_token=None) -> dict:
-    """Execute one Jira search page, raising JiraSearchError on failure."""
+    """Retry only this read-only search POST, with three attempts per page."""
     username = os.getenv("JIRA_USERNAME", "").strip()
     token = os.getenv("JIRA_API_TOKEN", "").strip()
     if not username or not token:
@@ -51,21 +72,35 @@ def _request(jql: str, fields: str, max_results: int, next_page_token=None) -> d
         "Accept": "application/json",
     }
 
+    req = urllib.request.Request(
+        f"{_JIRA_API}/search/jql",
+        data=json.dumps(payload).encode(),
+        headers=headers,
+        method="POST",
+    )
+    for attempt in range(1, _SEARCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                body = response.read()
+            break
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            raise JiraSearchError(f"Jira HTTP {exc.code}") from exc
+        except (OSError, http.client.IncompleteRead) as exc:
+            if not _retryable_transport_error(exc):
+                raise JiraSearchError("Jira non-retryable transport error") from exc
+            if attempt == _SEARCH_ATTEMPTS:
+                raise JiraSearchError(
+                    f"Jira search transport failure after {attempt} attempts") from exc
+            delay = _SEARCH_RETRY_DELAYS[attempt - 1]
+            print(f"Jira search transport failure (attempt {attempt}/{_SEARCH_ATTEMPTS}); "
+                  f"retrying in {delay}s", file=sys.stderr)
+            time.sleep(delay)
+
     try:
-        req = urllib.request.Request(
-            f"{_JIRA_API}/search/jql",
-            data=json.dumps(payload).encode(),
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode())
-    except urllib.error.HTTPError as exc:
-        raise JiraSearchError(f"Jira HTTP {exc.code}: {exc.reason}") from exc
-    except urllib.error.URLError as exc:
-        raise JiraSearchError(f"Jira network error: {exc.reason}") from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise JiraSearchError(f"Invalid Jira response: {exc}") from exc
+        data = json.loads(body.decode())
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise JiraSearchError("Invalid Jira response encoding or JSON") from exc
 
     if not isinstance(data, dict) or not isinstance(data.get("issues"), list):
         raise JiraSearchError("Jira response missing issues array")

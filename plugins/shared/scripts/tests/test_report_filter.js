@@ -216,7 +216,7 @@ const context = vm.createContext({
 });
 let alerts = 0;
 const renderer = fs.readFileSync(process.argv[2], 'utf8');
-const rendererEnd = renderer.lastIndexOf('})();');
+const rendererEnd = renderer.lastIndexOf('} catch (error)');
 const testExports = 'window.reportTest = {data: D, renderOverview, renderPeriodics, renderPRs, renderBugLinks, applyReportFilter, get appliedFilter() { return appliedFilter; }, get pendingRegex() { return pendingRegex; }};\n';
 vm.runInContext(renderer.slice(0, rendererEnd) + testExports + renderer.slice(rendererEnd), context);
 const reportTest = context.window.reportTest;
@@ -698,6 +698,9 @@ prsParent.textContent = '';
 reportTest.renderPRs(prsParent);
 assert.equal(prsParent.querySelector('.issues-table'), null);
 console.log('PASS failure headers: PR status and analysis-only fallback, empty analysis and absent jobs');
+if (process.argv.includes('--transport-tests')) {
+    require('./test_report_transport.js')({context, document, renderer, reportHTML});
+}
 
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

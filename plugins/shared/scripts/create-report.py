@@ -217,8 +217,9 @@ CSS = """\
 
 JS = """\
 (function() {
+try {
 var D = window.REPORT_DATA;
-if (!D) return;
+if (!D) throw new Error('Report data unavailable');
 var JIRA_BASE = 'https://issues.redhat.com';
 var _gc = 0;
 
@@ -1553,6 +1554,13 @@ function renderAppliedFilter() {
         download(lines.join('\\n'), name, 'text/csv');
     });
 })();
+} catch (error) {
+    var loading = document.getElementById('loading');
+    loading.style.display = 'flex';
+    loading.setAttribute('role', 'alert');
+    loading.textContent = 'Unable to display this report. Report data may be damaged or incomplete. Please retry with a newly generated report.';
+    document.querySelector('.container').style.display = 'none';
+}
 })();"""
 
 
@@ -2060,6 +2068,17 @@ _METRIC_FILES = [("cpu.json", "cpu"), ("mem.json", "mem"),
                  ("io.json", "io"), ("disk.json", "disk")]
 
 
+def _metric_transport(value):
+    """Keep metric numbers readable and valid JSON after substring censoring."""
+    if isinstance(value, dict):
+        return {key: _metric_transport(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_metric_transport(item) for item in value]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value) if not isinstance(value, float) or math.isfinite(value) else None
+    return value
+
+
 def _sanitize_metric_array(arr):
     """
     Sanitize a metric array, replacing non-numeric values with None.
@@ -2087,10 +2106,11 @@ def _sanitize_metric_array(arr):
 
 def _sanitize_metrics(metrics_dict):
     """
-    Sanitize all arrays in a metrics dictionary to ensure valid JSON serialization.
+    Sanitize numeric samples, including those in disk partition records.
 
     Replaces any non-numeric values in metric arrays with None (null in JSON).
     Preserves the 'timestamps' array unchanged as it contains string labels for charts.
+    Preserves the 'partitions' records and their scalar device/mount/capacity metadata.
     """
     if not isinstance(metrics_dict, dict):
         return metrics_dict
@@ -2101,6 +2121,9 @@ def _sanitize_metrics(metrics_dict):
             # Skip timestamps - they are string labels for charts
             continue
         if isinstance(value, list):
+            if key == 'partitions':
+                metrics_dict[key] = [_sanitize_metrics(partition) for partition in value]
+                continue
             sanitized, changed = _sanitize_metric_array(value)
             if changed:
                 print(f"WARNING: Sanitized corrupted values in metric '{key}'", file=sys.stderr)
@@ -2174,6 +2197,8 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
                             met = _load_job_metrics(bid)
                             if met:
                                 ajob["metrics"] = met
+                    if "metrics" in ajob:
+                        ajob["metrics"] = _metric_transport(ajob["metrics"])
 
     if pr_data and pr_data.get("prs"):
         for pr_item in pr_data["prs"]:
@@ -2189,6 +2214,8 @@ def generate_html(component_title, releases_data, all_bug_candidates, pr_data, p
                             met = _load_job_metrics(bid)
                             if met:
                                 ajob["metrics"] = met
+                    if "metrics" in ajob:
+                        ajob["metrics"] = _metric_transport(ajob["metrics"])
 
     # --- Build unified data model for client-side rendering ---
     report_data = {
